@@ -23,27 +23,21 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
-          def replace_once(text: str, old: str, new: str, label: str) -> str:
+          def replace_once(text, old, new, label):
               count = text.count(old)
               if count != 1:
                   raise SystemExit(f"{label}: expected exactly 1 match, found {count}")
               return text.replace(old, new, 1)
 
-          # 1) Type compatibility fixes used by App.tsx
           p = Path('src/types/vectorScope.ts')
           s = p.read_text(encoding='utf-8')
-          s = replace_once(
-              s,
-              "  | 'Custom XY';",
-              "  | 'Custom XY'\n  | 'Personnalisé';",
-              'PresetName Personnalisé'
-          )
+          s = replace_once(s, "  | 'Custom XY';", "  | 'Custom XY'\n  | 'Personnalisé';", 'PresetName Personnalisé')
           s = replace_once(s, '  piano: number;', '  piano?: number;', 'TabActivityLevels piano optional')
           s = replace_once(s, '  mandala_directory: number;', '  mandala_directory?: number;', 'TabActivityLevels mandala_directory optional')
           p.write_text(s, encoding='utf-8')
 
-          # 2) Octa system must actually produce signal after a preset is selected.
           p = Path('src/services/mathEngine.ts')
           s = p.read_text(encoding='utf-8')
           start = s.index('export function createDefaultOctaSystem(): OctaSystemState {')
@@ -54,91 +48,31 @@ jobs:
               raise SystemExit(f'createDefaultOctaSystem: expected 10 zero gains, found {gain_count}')
           block = block.replace('gain: 0,', 'gain: 1,')
           s = s[:start] + block + s[end:]
-
           preset_start = s.index("case 'Circle': {", s.index('export function applyOctaPreset'))
           preset_end = s.index("case 'Lissajous': {", preset_start)
           circle = s[preset_start:preset_end]
           old_circle = "waveform: 'cosine', quarterToneOffset: 0, amplitude: 0.8, phase: 90"
           if circle.count(old_circle) != 1:
-              raise SystemExit('Circle preset: expected cosine + 90° pattern exactly once')
+              raise SystemExit('Circle preset: expected cosine + 90 degree pattern exactly once')
           circle = circle.replace(old_circle, "waveform: 'cosine', quarterToneOffset: 0, amplitude: 0.8, phase: 0", 1)
           s = s[:preset_start] + circle + s[preset_end:]
           p.write_text(s, encoding='utf-8')
 
-          # 3) Audio engine: accept the App modulation-matrix call shape and refresh analyser buffers.
           p = Path('src/services/audioEngine.ts')
           s = p.read_text(encoding='utf-8')
-          s = replace_once(
-              s,
-              "  public updateOctaModMatrix(routings: ModRouting[]) {\n    this.octaState.modulationMatrix = { routings };\n    this.synthesisMode = 'octa';\n  }",
-              "  public updateOctaModMatrix(routingsOrConfig: ModRouting[] | { routings: ModRouting[] }) {\n    const routings = Array.isArray(routingsOrConfig) ? routingsOrConfig : routingsOrConfig.routings;\n    this.octaState.modulationMatrix = { routings };\n    this.synthesisMode = 'octa';\n  }",
-              'updateOctaModMatrix compatibility'
-          )
-          s = replace_once(
-              s,
-              "    if (this.isRecording) {\n      this.recordedChunksLeft.push(new Float32Array(leftOut));\n      this.recordedChunksRight.push(new Float32Array(rightOut));\n    }\n  }\n\n  public getHasClipping(): boolean {",
-              "    if (this.isRecording) {\n      this.recordedChunksLeft.push(new Float32Array(leftOut));\n      this.recordedChunksRight.push(new Float32Array(rightOut));\n    }\n\n    // Keep analyser/time-domain/FFT buffers synchronized with the live Web Audio graph.\n    this.updateBuffers();\n  }\n\n  public getHasClipping(): boolean {",
-              'live analyser refresh'
-          )
+          s = replace_once(s, "  public updateOctaModMatrix(routings: ModRouting[]) {\n    this.octaState.modulationMatrix = { routings };\n    this.synthesisMode = 'octa';\n  }", "  public updateOctaModMatrix(routingsOrConfig: ModRouting[] | { routings: ModRouting[] }) {\n    const routings = Array.isArray(routingsOrConfig) ? routingsOrConfig : routingsOrConfig.routings;\n    this.octaState.modulationMatrix = { routings };\n    this.synthesisMode = 'octa';\n  }", 'updateOctaModMatrix compatibility')
+          s = replace_once(s, "    if (this.isRecording) {\n      this.recordedChunksLeft.push(new Float32Array(leftOut));\n      this.recordedChunksRight.push(new Float32Array(rightOut));\n    }\n  }\n\n  public getHasClipping(): boolean {", "    if (this.isRecording) {\n      this.recordedChunksLeft.push(new Float32Array(leftOut));\n      this.recordedChunksRight.push(new Float32Array(rightOut));\n    }\n\n    // Keep analyser/time-domain/FFT buffers synchronized with the live Web Audio graph.\n    this.updateBuffers();\n  }\n\n  public getHasClipping(): boolean {", 'live analyser refresh')
           p.write_text(s, encoding='utf-8')
 
-          # 4) ExportModal: support both the legacy explicit props and App.tsx session-based props.
           p = Path('src/components/ExportModal.tsx')
           s = p.read_text(encoding='utf-8')
-          s = replace_once(
-              s,
-              "import { AudioExportOptions, ChannelConfig, RecordedExperiment } from '../types/vectorScope';",
-              "import { AudioExportOptions, ChannelConfig, RecordedExperiment, GenesisSessionData } from '../types/vectorScope';\nimport { VectorAudioEngine } from '../services/audioEngine';",
-              'ExportModal imports'
-          )
-          old = """interface ExportModalProps {
-  isOpen: boolean;
-  onClose: () => void;
-  configX: ChannelConfig;
-  configY: ChannelConfig;
-  currentPreset: string;
-  points: Array<[number, number]>;
-  rawTimeDataX: Float32Array;
-  rawTimeDataY: Float32Array;
-  sampleRate: number;
-}
-
-export const ExportModal: React.FC<ExportModalProps> = ({
-  isOpen,
-  onClose,
-  configX,
-  configY,
-  currentPreset,
-  points,
-  rawTimeDataX,
-  rawTimeDataY,
-  sampleRate,
-}) => {"""
-          new = """interface ExportModalProps {
-  isOpen: boolean;
-  onClose: () => void;
-  configX?: ChannelConfig;
-  configY?: ChannelConfig;
-  currentPreset?: string;
-  points?: Array<[number, number]>;
-  rawTimeDataX?: Float32Array;
-  rawTimeDataY?: Float32Array;
-  sampleRate?: number;
-  sessionData?: GenesisSessionData;
-  audioEngine?: VectorAudioEngine | null;
-  currentPoints?: Array<[number, number]>;
-}
-
-export const ExportModal: React.FC<ExportModalProps> = (props) => {
-  const { isOpen, onClose } = props;
-  const configX = (props.configX ?? props.sessionData?.configX ?? props.audioEngine?.getConfig('x')) as ChannelConfig;
-  const configY = (props.configY ?? props.sessionData?.configY ?? props.audioEngine?.getConfig('y')) as ChannelConfig;
-  const currentPreset = props.currentPreset ?? props.sessionData?.currentPreset ?? 'Custom XY';
-  const points = props.points ?? props.currentPoints ?? props.audioEngine?.xyPoints ?? [];
-  const rawTimeDataX = props.rawTimeDataX ?? props.audioEngine?.rawBufferX ?? new Float32Array(0);
-  const rawTimeDataY = props.rawTimeDataY ?? props.audioEngine?.rawBufferY ?? new Float32Array(0);
-  const sampleRate = props.sampleRate ?? props.audioEngine?.getSampleRate() ?? 48000;"""
-          s = replace_once(s, old, new, 'ExportModal prop adapter')
+          s = replace_once(s, "import { AudioExportOptions, ChannelConfig, RecordedExperiment } from '../types/vectorScope';", "import { AudioExportOptions, ChannelConfig, RecordedExperiment, GenesisSessionData } from '../types/vectorScope';\nimport { VectorAudioEngine } from '../services/audioEngine';", 'ExportModal imports')
+          pattern = re.compile(r"interface ExportModalProps \{.*?\n\}\n\nexport const ExportModal: React\.FC<ExportModalProps> = \(\{.*?\n\}\) => \{", re.S)
+          matches = pattern.findall(s)
+          if len(matches) != 1:
+              raise SystemExit(f'ExportModal prop adapter: expected exactly 1 block, found {len(matches)}')
+          replacement = "interface ExportModalProps {\n  isOpen: boolean;\n  onClose: () => void;\n  configX?: ChannelConfig;\n  configY?: ChannelConfig;\n  currentPreset?: string;\n  points?: Array<[number, number]>;\n  rawTimeDataX?: Float32Array;\n  rawTimeDataY?: Float32Array;\n  sampleRate?: number;\n  sessionData?: GenesisSessionData;\n  audioEngine?: VectorAudioEngine | null;\n  currentPoints?: Array<[number, number]>;\n}\n\nexport const ExportModal: React.FC<ExportModalProps> = (props) => {\n  const { isOpen, onClose } = props;\n  const configX = (props.configX ?? props.sessionData?.configX ?? props.audioEngine?.getConfig('x')) as ChannelConfig;\n  const configY = (props.configY ?? props.sessionData?.configY ?? props.audioEngine?.getConfig('y')) as ChannelConfig;\n  const currentPreset = props.currentPreset ?? props.sessionData?.currentPreset ?? 'Custom XY';\n  const points = props.points ?? props.currentPoints ?? props.audioEngine?.xyPoints ?? [];\n  const rawTimeDataX = props.rawTimeDataX ?? props.audioEngine?.rawBufferX ?? new Float32Array(0);\n  const rawTimeDataY = props.rawTimeDataY ?? props.audioEngine?.rawBufferY ?? new Float32Array(0);\n  const sampleRate = props.sampleRate ?? props.audioEngine?.getSampleRate() ?? 48000;"
+          s = pattern.sub(replacement, s, count=1)
           p.write_text(s, encoding='utf-8')
           PY
 
