@@ -450,7 +450,8 @@ export class VectorAudioEngine {
     this.octaState.autoNormalize = normalize;
   }
 
-  public updateOctaModMatrix(routings: ModRouting[]) {
+  public updateOctaModMatrix(routingsOrConfig: ModRouting[] | { routings: ModRouting[] }) {
+    const routings = Array.isArray(routingsOrConfig) ? routingsOrConfig : routingsOrConfig.routings;
     this.octaState.modulationMatrix = { routings };
     this.synthesisMode = 'octa';
   }
@@ -733,6 +734,9 @@ export class VectorAudioEngine {
       this.recordedChunksLeft.push(new Float32Array(leftOut));
       this.recordedChunksRight.push(new Float32Array(rightOut));
     }
+
+    // Keep analyser/time-domain/FFT buffers synchronized with the live Web Audio graph.
+    this.updateBuffers();
   }
 
   public getHasClipping(): boolean {

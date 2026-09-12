@@ -786,13 +786,13 @@ export function createDefaultOctaSystem(): OctaSystemState {
     masterFrequency: 0,
     autoNormalize: true,
     mixerLeft: {
-      gain: 0,
+      gain: 1,
       mute: false,
       solo: false,
       invertPhase: false,
     },
     mixerRight: {
-      gain: 0,
+      gain: 1,
       mute: false,
       solo: false,
       invertPhase: false,
@@ -819,7 +819,7 @@ export function createDefaultOctaSystem(): OctaSystemState {
         fmRate: 0,
         mute: false,
         solo: false,
-        gain: 0,
+        gain: 1,
       },
       L2: {
         id: 'L2',
@@ -839,7 +839,7 @@ export function createDefaultOctaSystem(): OctaSystemState {
         fmRate: 0,
         mute: false,
         solo: false,
-        gain: 0,
+        gain: 1,
       },
       L3: {
         id: 'L3',
@@ -859,7 +859,7 @@ export function createDefaultOctaSystem(): OctaSystemState {
         fmRate: 0,
         mute: false,
         solo: false,
-        gain: 0,
+        gain: 1,
       },
       L4: {
         id: 'L4',
@@ -879,7 +879,7 @@ export function createDefaultOctaSystem(): OctaSystemState {
         fmRate: 0,
         mute: false,
         solo: false,
-        gain: 0,
+        gain: 1,
       },
       R1: {
         id: 'R1',
@@ -899,7 +899,7 @@ export function createDefaultOctaSystem(): OctaSystemState {
         fmRate: 0,
         mute: false,
         solo: false,
-        gain: 0,
+        gain: 1,
       },
       R2: {
         id: 'R2',
@@ -919,7 +919,7 @@ export function createDefaultOctaSystem(): OctaSystemState {
         fmRate: 0,
         mute: false,
         solo: false,
-        gain: 0,
+        gain: 1,
       },
       R3: {
         id: 'R3',
@@ -939,7 +939,7 @@ export function createDefaultOctaSystem(): OctaSystemState {
         fmRate: 0,
         mute: false,
         solo: false,
-        gain: 0,
+        gain: 1,
       },
       R4: {
         id: 'R4',
@@ -959,7 +959,7 @@ export function createDefaultOctaSystem(): OctaSystemState {
         fmRate: 0,
         mute: false,
         solo: false,
-        gain: 0,
+        gain: 1,
       },
     },
   };
@@ -1054,7 +1054,7 @@ export function applyOctaPreset(preset: PresetName, state: OctaSystemState): Oct
       gens.L3 = { ...gens.L3, enabled: false };
       gens.L4 = { ...gens.L4, enabled: false };
 
-      gens.R1 = { ...gens.R1, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: 0, amplitude: 0.8, phase: 90 };
+      gens.R1 = { ...gens.R1, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: 0, amplitude: 0.8, phase: 0 };
       gens.R2 = { ...gens.R2, enabled: false };
       gens.R3 = { ...gens.R3, enabled: false };
       gens.R4 = { ...gens.R4, enabled: false };

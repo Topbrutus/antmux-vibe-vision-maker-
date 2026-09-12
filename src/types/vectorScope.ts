@@ -25,7 +25,8 @@ export type PresetName =
   | 'Octa-Lissajous'
   | 'Sacred Lotus 8-Gen'
   | 'Harmonic Star'
-  | 'Custom XY';
+  | 'Custom XY'
+  | 'Personnalisé';
 
 export type ScopeRenderMode = 'phosphor' | 'line' | 'points' | 'accumulation';
 
@@ -131,14 +132,14 @@ export interface ScopeActiveToggles {
 export interface TabActivityLevels {
   main: number;
   sequence_generators?: number;
-  piano: number;
+  piano?: number;
   segmented: number;
   matrix: number;
   radio: number;
   mics: number;
   patterns: number;
   sessions: number;
-  mandala_directory: number;
+  mandala_directory?: number;
   image_lab: number;
   text_lab: number;
   timeline: number;

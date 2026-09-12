@@ -10,7 +10,8 @@ import {
   Archive,
   CheckCircle2
 } from 'lucide-react';
-import { AudioExportOptions, ChannelConfig, RecordedExperiment } from '../types/vectorScope';
+import { AudioExportOptions, ChannelConfig, RecordedExperiment, GenesisSessionData } from '../types/vectorScope';
+import { VectorAudioEngine } from '../services/audioEngine';
 import {
   encodeStereoWav,
   createExperimentZipBundle,
@@ -22,26 +23,27 @@ import { exportPointsToSvg, exportPointsToCsv } from '../services/mathEngine';
 interface ExportModalProps {
   isOpen: boolean;
   onClose: () => void;
-  configX: ChannelConfig;
-  configY: ChannelConfig;
-  currentPreset: string;
-  points: Array<[number, number]>;
-  rawTimeDataX: Float32Array;
-  rawTimeDataY: Float32Array;
-  sampleRate: number;
+  configX?: ChannelConfig;
+  configY?: ChannelConfig;
+  currentPreset?: string;
+  points?: Array<[number, number]>;
+  rawTimeDataX?: Float32Array;
+  rawTimeDataY?: Float32Array;
+  sampleRate?: number;
+  sessionData?: GenesisSessionData;
+  audioEngine?: VectorAudioEngine | null;
+  currentPoints?: Array<[number, number]>;
 }
 
-export const ExportModal: React.FC<ExportModalProps> = ({
-  isOpen,
-  onClose,
-  configX,
-  configY,
-  currentPreset,
-  points,
-  rawTimeDataX,
-  rawTimeDataY,
-  sampleRate,
-}) => {
+export const ExportModal: React.FC<ExportModalProps> = (props) => {
+  const { isOpen, onClose } = props;
+  const configX = (props.configX ?? props.sessionData?.configX ?? props.audioEngine?.getConfig('x')) as ChannelConfig;
+  const configY = (props.configY ?? props.sessionData?.configY ?? props.audioEngine?.getConfig('y')) as ChannelConfig;
+  const currentPreset = props.currentPreset ?? props.sessionData?.currentPreset ?? 'Custom XY';
+  const points = props.points ?? props.currentPoints ?? props.audioEngine?.xyPoints ?? [];
+  const rawTimeDataX = props.rawTimeDataX ?? props.audioEngine?.rawBufferX ?? new Float32Array(0);
+  const rawTimeDataY = props.rawTimeDataY ?? props.audioEngine?.rawBufferY ?? new Float32Array(0);
+  const sampleRate = props.sampleRate ?? props.audioEngine?.getSampleRate() ?? 48000;
   const [exportType, setExportType] = useState<'wav' | 'bundle' | 'svg' | 'csv'>('bundle');
   const [targetSampleRate, setTargetSampleRate] = useState<44100 | 48000 | 96000>(48000);
   const [bitDepth, setBitDepth] = useState<16 | 24 | 32>(24);
