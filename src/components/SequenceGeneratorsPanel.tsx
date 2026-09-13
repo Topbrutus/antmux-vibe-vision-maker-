@@ -30,7 +30,9 @@ import {
   SequenceGeneratorItem,
   TimelineScene,
   TemporalNudgeCorrection,
-  TemporalCorrectionSpan
+  TemporalCorrectionSpan,
+  PatternFillChannel,
+  ScopeDisplaySettings
 } from '../types/vectorScope';
 import {
   loadSequenceGenerators,
@@ -40,25 +42,66 @@ import {
   computeTemporalOffsetAtTime
 } from '../services/sequenceGeneratorStorage';
 import { encodeStereoWav, triggerBlobDownload } from '../services/exportUtils';
+import { SnappableScopeWindow } from './SnappableScopeWindow';
 
 interface SequenceGeneratorsPanelProps {
-  onApplyPointsToScope: (points: Array<[number, number]>, color: string, name: string) => void;
+  onApplyPointsToScope: (
+    points: Array<[number, number]>,
+    color: string,
+    name: string,
+    fillChannels?: PatternFillChannel[]
+  ) => void;
   onApplyTimelineScenes?: (scenes: TimelineScene[]) => void;
   onOpenAiChat?: () => void;
   activeGeneratorId?: string;
+  scopeSettings?: ScopeDisplaySettings;
+  onScopeSettingsChange?: (updates: Partial<ScopeDisplaySettings>) => void;
 }
+
+const DEFAULT_SCOPE_SETTINGS: ScopeDisplaySettings = {
+  thickness: 2,
+  brightness: 1.0,
+  persistence: 0.75,
+  zoom: 1.0,
+  rotation: 0,
+  centerX: 0,
+  centerY: 0,
+  normalize: true,
+  showGrid: true,
+  showAxes: true,
+  mode: 'phosphor',
+  colorScheme: 'green_phosphor',
+  handMode: 'left_handed',
+};
 
 export const SequenceGeneratorsPanel: React.FC<SequenceGeneratorsPanelProps> = ({
   onApplyPointsToScope,
   onApplyTimelineScenes,
   onOpenAiChat,
   activeGeneratorId: propActiveId,
+  scopeSettings = DEFAULT_SCOPE_SETTINGS,
+  onScopeSettingsChange,
 }) => {
   const [generators, setGenerators] = useState<SequenceGeneratorItem[]>(() => loadSequenceGenerators());
   const [activeGenId, setActiveGenId] = useState<string>(propActiveId || 'seq_gen_rabbit_burrow_01');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [recordingGenId, setRecordingGenId] = useState<string | null>(null);
+
+  // Snappable Scope state
+  const [isSnappableScopeOpen, setIsSnappableScopeOpen] = useState<boolean>(false);
+  const [isScopePaused, setIsScopePaused] = useState<boolean>(false);
+  const [localScopeSettings, setLocalScopeSettings] = useState<ScopeDisplaySettings>(scopeSettings);
+
+  const activeGen = generators.find((g) => g.id === activeGenId) || generators[0];
+  const activeSample = activeGen ? sampleGeneratorAtTime(activeGen, 0) : { points: [], fillChannels: [] };
+
+  const handleScopeSettingsUpdate = (updates: Partial<ScopeDisplaySettings>) => {
+    setLocalScopeSettings((prev) => ({ ...prev, ...updates }));
+    if (onScopeSettingsChange) {
+      onScopeSettingsChange(updates);
+    }
+  };
 
   // Keep localStorage in sync
   useEffect(() => {
@@ -75,14 +118,14 @@ export const SequenceGeneratorsPanel: React.FC<SequenceGeneratorsPanelProps> = (
     if (target && target.id === activeGenId) {
       const updated = { ...target, ...updates };
       const sample = sampleGeneratorAtTime(updated, 0);
-      onApplyPointsToScope(sample.points, updated.primaryColor, updated.name);
+      onApplyPointsToScope(sample.points, updated.primaryColor, updated.name, sample.fillChannels);
     }
   };
 
   const handleInjectIntoScope = (gen: SequenceGeneratorItem) => {
     setActiveGenId(gen.id);
     const sample = sampleGeneratorAtTime(gen, 0);
-    onApplyPointsToScope(sample.points, gen.primaryColor, gen.name);
+    onApplyPointsToScope(sample.points, gen.primaryColor, gen.name, sample.fillChannels);
   };
 
   const handleDuplicateGenerator = (gen: SequenceGeneratorItem) => {
@@ -174,7 +217,22 @@ export const SequenceGeneratorsPanel: React.FC<SequenceGeneratorsPanelProps> = (
   });
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 relative">
+      {/* Snappable Floating Oscilloscope Window for Sequences */}
+      {isSnappableScopeOpen && (
+        <SnappableScopeWindow
+          points={activeSample.points}
+          settings={localScopeSettings}
+          onSettingsChange={handleScopeSettingsUpdate}
+          presetName={activeGen?.name || 'Générateur de Séquence'}
+          isPaused={isScopePaused}
+          onTogglePause={() => setIsScopePaused(!isScopePaused)}
+          currentLabel={`SÉQUENCE : ${activeGen?.name || 'Sélectionnée'}`}
+          defaultSnap="top_right"
+          onClose={() => setIsSnappableScopeOpen(false)}
+        />
+      )}
+
       {/* Top Banner & Control Bar */}
       <div className="bg-[#070e1c] border border-[#162744] p-5 rounded-2xl shadow-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
         <div>
@@ -198,6 +256,20 @@ export const SequenceGeneratorsPanel: React.FC<SequenceGeneratorsPanelProps> = (
 
         {/* Action Buttons */}
         <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
+          <button
+            type="button"
+            onClick={() => setIsSnappableScopeOpen(!isSnappableScopeOpen)}
+            className={`px-3 py-2 rounded-xl text-xs font-mono font-bold flex items-center gap-2 border transition-all ${
+              isSnappableScopeOpen
+                ? 'bg-cyan-500 text-slate-950 border-cyan-300 shadow-md shadow-cyan-500/20'
+                : 'bg-[#061022] text-cyan-300 border-cyan-800 hover:bg-[#0c1f3d]'
+            }`}
+            title="Afficher / Masquer l'oscilloscope déplaçable et snappable"
+          >
+            <Move className="w-3.5 h-3.5" />
+            <span>{isSnappableScopeOpen ? 'OSCILLOSCOPE SNAPPABLE (ACTIF)' : 'AFFICHER OSCILLOSCOPE'}</span>
+          </button>
+
           <button
             onClick={handleAddNewGenerator}
             id="btn-add-new-seq-generator"
@@ -324,17 +396,36 @@ const GeneratorCardItem: React.FC<GeneratorCardItemProps> = ({
   // Explicitly requested by user: '1_frame' | '1_sec' | '5_sec' | '10_sec' | 'all'
   const [selectedSpan, setSelectedSpan] = useState<TemporalCorrectionSpan>('5_sec');
 
-  // Live Specs computed each frame
-  const [liveSpecs, setLiveSpecs] = useState({
-    timeSec: 0,
-    frameNumber: 0,
-    totalFrames: 0,
-    effectiveX: 0,
-    effectiveY: 0,
-    autoDeltaX: 0,
-    autoDeltaY: 0,
-    keyframeLabel: '',
-  });
+  // Keep playbackTime Ref synchronized with state to prevent stale closures and avoid effect teardown loops
+  const playbackTimeRef = useRef<number>(playbackTime);
+  playbackTimeRef.current = playbackTime;
+
+  // Live Specs computed each frame directly during render (no state synchronization loop needed!)
+  const fps = generator.fps || 30;
+  const currentFrame = Math.round(playbackTime * fps);
+  const totalFrames = Math.round(generator.durationSec * fps);
+  const { autoDeltaX, autoDeltaY } = computeTemporalOffsetAtTime(generator, playbackTime);
+  const effectiveX = generator.offsetX + autoDeltaX + (isDragging ? dragDelta.dx : 0);
+  const effectiveY = generator.offsetY + autoDeltaY + (isDragging ? dragDelta.dy : 0);
+
+  const kfs = generator.keyframes || [];
+  let label = 'Animation continue';
+  if (kfs.length > 0) {
+    const segFloat = (playbackTime / Math.max(0.1, generator.durationSec || 1)) * kfs.length;
+    const idx = Math.min(kfs.length - 1, Math.max(0, Math.floor(segFloat) % kfs.length));
+    label = kfs[idx]?.label || 'Animation continue';
+  }
+
+  const liveSpecs = {
+    timeSec: Number(playbackTime.toFixed(2)),
+    frameNumber: currentFrame,
+    totalFrames,
+    effectiveX: Number(effectiveX.toFixed(2)),
+    effectiveY: Number(effectiveY.toFixed(2)),
+    autoDeltaX: Number((autoDeltaX + (isDragging ? dragDelta.dx : 0)).toFixed(2)),
+    autoDeltaY: Number((autoDeltaY + (isDragging ? dragDelta.dy : 0)).toFixed(2)),
+    keyframeLabel: label,
+  };
 
   const COLOR_SWATCHES = [
     { label: 'Blanc', value: '#ffffff' },
@@ -355,7 +446,7 @@ const GeneratorCardItem: React.FC<GeneratorCardItemProps> = ({
     { label: '2.0x Géant', value: 2.0 },
   ];
 
-  // Continuous animation loop for the preview canvas
+  // Continuous animation loop for the preview canvas (now completely decoupled from the playbackTime state trigger)
   useEffect(() => {
     let active = true;
 
@@ -367,7 +458,8 @@ const GeneratorCardItem: React.FC<GeneratorCardItemProps> = ({
       const effectiveDur = Math.max(0.5, generator.durationSec / Math.max(0.1, generator.speedMultiplier));
 
       if (isPlaying && !isDragging) {
-        setPlaybackTime((prev) => (prev + dt) % effectiveDur);
+        playbackTimeRef.current = (playbackTimeRef.current + dt) % effectiveDur;
+        setPlaybackTime(playbackTimeRef.current);
       }
 
       drawPreviewFrame();
@@ -381,36 +473,7 @@ const GeneratorCardItem: React.FC<GeneratorCardItemProps> = ({
       active = false;
       if (animRef.current) cancelAnimationFrame(animRef.current);
     };
-  }, [isPlaying, isDragging, generator, dragDelta, playbackTime]);
-
-  // Compute live specs whenever playbackTime changes
-  useEffect(() => {
-    const fps = generator.fps || 30;
-    const currentFrame = Math.round(playbackTime * fps);
-    const totalFrames = Math.round(generator.durationSec * fps);
-    const { autoDeltaX, autoDeltaY } = computeTemporalOffsetAtTime(generator, playbackTime);
-    const effectiveX = generator.offsetX + autoDeltaX + (isDragging ? dragDelta.dx : 0);
-    const effectiveY = generator.offsetY + autoDeltaY + (isDragging ? dragDelta.dy : 0);
-
-    const kfs = generator.keyframes;
-    let label = 'Animation continue';
-    if (kfs.length > 0) {
-      const segFloat = (playbackTime / Math.max(0.1, generator.durationSec)) * kfs.length;
-      const idx = Math.floor(segFloat) % kfs.length;
-      label = kfs[idx].label;
-    }
-
-    setLiveSpecs({
-      timeSec: Number(playbackTime.toFixed(2)),
-      frameNumber: currentFrame,
-      totalFrames,
-      effectiveX: Number(effectiveX.toFixed(2)),
-      effectiveY: Number(effectiveY.toFixed(2)),
-      autoDeltaX: Number((autoDeltaX + (isDragging ? dragDelta.dx : 0)).toFixed(2)),
-      autoDeltaY: Number((autoDeltaY + (isDragging ? dragDelta.dy : 0)).toFixed(2)),
-      keyframeLabel: label,
-    });
-  }, [playbackTime, generator, isDragging, dragDelta]);
+  }, [isPlaying, isDragging, generator, dragDelta]); // Removed high-frequency playbackTime dependency!
 
   const drawPreviewFrame = () => {
     const canvas = canvasRef.current;
@@ -438,7 +501,7 @@ const GeneratorCardItem: React.FC<GeneratorCardItemProps> = ({
     ctx.stroke();
 
     // Sample current points with auto-equilibration applied
-    const sample = sampleGeneratorAtTime(generator, playbackTime);
+    const sample = sampleGeneratorAtTime(generator, playbackTimeRef.current);
     if (!sample.points || sample.points.length === 0) return;
 
     const scaleFactor = (Math.min(width, height) / 2) * 0.85;
@@ -697,11 +760,11 @@ const GeneratorCardItem: React.FC<GeneratorCardItemProps> = ({
 
   const handleSendToTimeline = () => {
     if (!onApplyTimelineScenes) return;
-    const scenes: TimelineScene[] = generator.keyframes.map((kf, i) => ({
+    const scenes: TimelineScene[] = (generator.keyframes || []).map((kf, i) => ({
       id: `scene_${generator.id}_${i}_${Date.now()}`,
-      name: `${generator.name} - ${kf.label}`,
+      name: `${generator.name} - ${kf?.label || `Keyframe ${i + 1}`}`,
       type: 'preset',
-      duration: Number((generator.durationSec / generator.keyframes.length).toFixed(1)),
+      duration: Number((generator.durationSec / Math.max(1, generator.keyframes?.length || 1)).toFixed(1)),
       transition: 'morph',
       transitionDuration: 0.5,
     }));

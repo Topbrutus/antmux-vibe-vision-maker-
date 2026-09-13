@@ -25,12 +25,14 @@ export type PresetName =
   | 'Octa-Lissajous'
   | 'Sacred Lotus 8-Gen'
   | 'Harmonic Star'
-  | 'Custom XY';
+  | 'Custom XY'
+  | 'Personnalisé';
 
 export type ScopeRenderMode = 'phosphor' | 'line' | 'points' | 'accumulation';
 
 export type AppMode =
   | 'main'
+  | 'mixer'
   | 'sequence_generators'
   | 'piano'
   | 'segmented'
@@ -100,6 +102,7 @@ export interface PatternItem {
   description?: string;
   createdAt: string;
   points: Array<[number, number]>;
+  pointColors?: string[]; // Direct per-point RGB hex strings encoded in the pattern
   segments?: Array<{
     id: string;
     points: Array<[number, number]>;
@@ -109,6 +112,8 @@ export interface PatternItem {
   fillChannels?: PatternFillChannel[];
   sourceModule: string;
   color?: string;
+  colorEncoding?: 'monochrome' | 'rgb_points' | 'segments' | 'fill_channels' | 'laser_chroma';
+  handMode?: 'left_handed' | 'right_handed';
   isFavorite?: boolean;
 }
 
@@ -291,7 +296,22 @@ export interface ScopeDisplaySettings {
   showGrid: boolean;
   showAxes: boolean;
   mode: ScopeRenderMode;
-  colorTheme: 'cyan_phosphor' | 'green_crt' | 'gold_amber' | 'arctic_white';
+  colorTheme?: 'cyan_phosphor' | 'green_crt' | 'gold_amber' | 'arctic_white' | 'custom';
+  colorScheme?: 'green_phosphor' | 'amber_phosphor' | 'white_phosphor' | 'blue_phosphor' | 'gold_phosphor' | 'custom';
+  primaryColor?: string;
+  fillChannels?: PatternFillChannel[];
+  segmentColors?: Record<number, string>;
+  pointColors?: string[];
+  handMode?: 'left_handed' | 'right_handed';
+  colorEncodingMode?: 'monochrome' | 'rgb_vector' | 'ilda_chroma' | 'segmented';
+
+  // USER MANDATE: Bruit blanc résonant intérieur rebondissant sur le contour du motif
+  noiseFillEnabled?: boolean;
+  noiseFrequency?: number; // 100 Hz .. 20 000 Hz
+  noiseDensity?: number; // 50 .. 2000 points/faisceaux
+  noiseBounceSpeed?: number; // 0.1 .. 5.0
+  noiseIntensity?: number; // 0.1 .. 2.0
+  noiseBounceMode?: 'specular' | 'stochastic' | 'quantum_diffuse';
 }
 
 export interface FloatingWindowState {
@@ -517,6 +537,46 @@ export interface RecordedExperiment {
   points?: Array<[number, number]>;
 }
 
+export interface TabMixerChannel {
+  id: AppMode;
+  name: string;
+  category: string;
+  isPaused: boolean;
+  isMuted: boolean;
+  inMixer: boolean; // Crochet de sélection pour être entendu et visualisé dans le mixeur
+  volume: number; // 0..2 (Gain du canal)
+  pan: number; // -1..1 (Panoramique stéréo / balance X-Y)
+  solo: boolean;
+  frequency?: number;
+  activityLevel: number; // 0..1
+  color: string;
+}
+
+export interface MasterMixerState {
+  masterVolume: number;
+  masterMute: boolean;
+  autoNormalize: boolean;
+  channels: Record<string, TabMixerChannel>;
+  rabbitDualZoneEnabled?: boolean;
+  rabbitPrimaryColor?: string;
+  rabbitBurrowColor?: string;
+  rabbitEarsColor?: string;
+  rabbitNoiseEnabled?: boolean;
+  rabbitNoiseFrequency?: number;
+  rabbitNoiseDensity?: number;
+  rabbitNoiseSpeed?: number;
+  rabbitDualZone?: {
+    enabled: boolean;
+    primaryColor: string;
+    earsColor: string;
+    burrowColor: string;
+    noiseEnabled: boolean;
+    noiseFrequency: number;
+    noiseDensity: number;
+    noiseBounceSpeed: number;
+  };
+}
+
 export interface GenesisSessionData {
   id?: string;
   name?: string;
@@ -533,4 +593,11 @@ export interface GenesisSessionData {
   currentPreset: PresetName;
   timelineScenes: TimelineScene[];
   scopeSettings: ScopeDisplaySettings;
+  masterMixerState?: MasterMixerState;
+  tabControls?: Record<string, { isPaused: boolean; isMuted: boolean; inMixer: boolean; volume: number }>;
+  radioConfig?: RadioTrackConfig;
+  mic1Config?: MicrophoneChannelConfig;
+  mic2Config?: MicrophoneChannelConfig;
+  mandalaLayers?: MandalaLayer[];
+  activePatternId?: string;
 }

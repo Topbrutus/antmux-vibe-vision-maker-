@@ -37,7 +37,8 @@ export function evalWaveform(
     case 'sawtooth_down':
       return 1 - (normPhase / Math.PI);
     case 'noise':
-      return (Math.random() * 2 - 1);
+      // Gentle textured background "dust" (poussière), not a massive earthquake
+      return (Math.random() * 2 - 1) * 0.08;
     case 'custom': {
       let sum = 0;
       let totalWeight = 0;
@@ -60,9 +61,15 @@ export function evalWaveform(
  */
 export function evalSegmentSample(t: number, baseFreq: number, seg: GeneratorSegmentConfig): number {
   if (!seg.enabled) return 0;
-  const mod = seg.fmDepth > 0 ? 1 + seg.fmDepth * Math.sin(2 * Math.PI * seg.fmRate * t) : 1;
-  const freq = baseFreq * seg.frequencyRatio * mod;
-  const phase = 2 * Math.PI * freq * t + (seg.phase * Math.PI) / 180;
+  // Use exact analytical integral for FM phase to prevent t-multiplication frequency sweep errors
+  const carrierFreq = baseFreq * seg.frequencyRatio;
+  let phase = 0;
+  if (seg.fmDepth > 0) {
+    const rate = Math.max(0.01, seg.fmRate);
+    phase = 2 * Math.PI * carrierFreq * (t - (seg.fmDepth / (2 * Math.PI * rate)) * Math.cos(2 * Math.PI * rate * t)) + (seg.phase * Math.PI) / 180;
+  } else {
+    phase = 2 * Math.PI * carrierFreq * t + (seg.phase * Math.PI) / 180;
+  }
   const raw = evalWaveform(seg.waveform, phase);
   return (raw * seg.amplitude + seg.offset);
 }
@@ -142,16 +149,22 @@ export function computeSampleXY(
   configX: ChannelConfig,
   configY: ChannelConfig
 ): [number, number] {
-  // FM modulation on frequency if depth > 0
-  const modX = configX.fmDepth > 0
-    ? 1 + configX.fmDepth * Math.sin(2 * Math.PI * configX.fmRate * t)
-    : 1;
-  const modY = configY.fmDepth > 0
-    ? 1 + configY.fmDepth * Math.sin(2 * Math.PI * configY.fmRate * t)
-    : 1;
+  // Use exact analytical integral for FM phase to prevent t-multiplication frequency sweep errors
+  let phaseX = 0;
+  if (configX.fmDepth > 0) {
+    const rateX = Math.max(0.01, configX.fmRate);
+    phaseX = 2 * Math.PI * configX.frequency * (t - (configX.fmDepth / (2 * Math.PI * rateX)) * Math.cos(2 * Math.PI * rateX * t)) + (configX.phase * Math.PI) / 180;
+  } else {
+    phaseX = 2 * Math.PI * configX.frequency * t + (configX.phase * Math.PI) / 180;
+  }
 
-  const phaseX = 2 * Math.PI * configX.frequency * modX * t + (configX.phase * Math.PI) / 180;
-  const phaseY = 2 * Math.PI * configY.frequency * modY * t + (configY.phase * Math.PI) / 180;
+  let phaseY = 0;
+  if (configY.fmDepth > 0) {
+    const rateY = Math.max(0.01, configY.fmRate);
+    phaseY = 2 * Math.PI * configY.frequency * (t - (configY.fmDepth / (2 * Math.PI * rateY)) * Math.cos(2 * Math.PI * rateY * t)) + (configY.phase * Math.PI) / 180;
+  } else {
+    phaseY = 2 * Math.PI * configY.frequency * t + (configY.phase * Math.PI) / 180;
+  }
 
   const rawX = evalWaveform(configX.waveform, phaseX, configX.customHarmonics);
   const rawY = evalWaveform(configY.waveform, phaseY, configY.customHarmonics);
@@ -783,16 +796,16 @@ export function computeOctaSample(
 export function createDefaultOctaSystem(): OctaSystemState {
   return {
     tuningMode: 'LOCKED',
-    masterFrequency: 0,
+    masterFrequency: 220,
     autoNormalize: true,
     mixerLeft: {
-      gain: 0,
+      gain: 1.0,
       mute: false,
       solo: false,
       invertPhase: false,
     },
     mixerRight: {
-      gain: 0,
+      gain: 1.0,
       mute: false,
       solo: false,
       invertPhase: false,
@@ -807,19 +820,19 @@ export function createDefaultOctaSystem(): OctaSystemState {
         zoneKey: 'A',
         channel: 'L',
         index: 1,
-        enabled: false,
+        enabled: true,
         waveform: 'sine',
-        baseFrequency: 0,
+        baseFrequency: 220,
         quarterToneOffset: 0,
         phase: 0,
-        amplitude: 0,
+        amplitude: 0.8,
         offset: 0,
         polarity: 1,
         fmDepth: 0,
         fmRate: 0,
         mute: false,
         solo: false,
-        gain: 0,
+        gain: 1.0,
       },
       L2: {
         id: 'L2',
@@ -832,14 +845,14 @@ export function createDefaultOctaSystem(): OctaSystemState {
         baseFrequency: 0,
         quarterToneOffset: 0,
         phase: 0,
-        amplitude: 0,
+        amplitude: 0.5,
         offset: 0,
         polarity: 1,
         fmDepth: 0,
         fmRate: 0,
         mute: false,
         solo: false,
-        gain: 0,
+        gain: 1.0,
       },
       L3: {
         id: 'L3',
@@ -852,14 +865,14 @@ export function createDefaultOctaSystem(): OctaSystemState {
         baseFrequency: 0,
         quarterToneOffset: 0,
         phase: 0,
-        amplitude: 0,
+        amplitude: 0.4,
         offset: 0,
         polarity: 1,
         fmDepth: 0,
         fmRate: 0,
         mute: false,
         solo: false,
-        gain: 0,
+        gain: 1.0,
       },
       L4: {
         id: 'L4',
@@ -872,14 +885,14 @@ export function createDefaultOctaSystem(): OctaSystemState {
         baseFrequency: 0,
         quarterToneOffset: 0,
         phase: 0,
-        amplitude: 0,
+        amplitude: 0.25,
         offset: 0,
         polarity: 1,
         fmDepth: 0,
         fmRate: 0,
         mute: false,
         solo: false,
-        gain: 0,
+        gain: 1.0,
       },
       R1: {
         id: 'R1',
@@ -887,19 +900,19 @@ export function createDefaultOctaSystem(): OctaSystemState {
         zoneKey: 'B',
         channel: 'R',
         index: 1,
-        enabled: false,
-        waveform: 'sine',
-        baseFrequency: 0,
+        enabled: true,
+        waveform: 'cosine',
+        baseFrequency: 220,
         quarterToneOffset: 0,
         phase: 0,
-        amplitude: 0,
+        amplitude: 0.8,
         offset: 0,
         polarity: 1,
         fmDepth: 0,
         fmRate: 0,
         mute: false,
         solo: false,
-        gain: 0,
+        gain: 1.0,
       },
       R2: {
         id: 'R2',
@@ -912,14 +925,14 @@ export function createDefaultOctaSystem(): OctaSystemState {
         baseFrequency: 0,
         quarterToneOffset: 0,
         phase: 0,
-        amplitude: 0,
+        amplitude: 0.5,
         offset: 0,
         polarity: 1,
         fmDepth: 0,
         fmRate: 0,
         mute: false,
         solo: false,
-        gain: 0,
+        gain: 1.0,
       },
       R3: {
         id: 'R3',
@@ -932,14 +945,14 @@ export function createDefaultOctaSystem(): OctaSystemState {
         baseFrequency: 0,
         quarterToneOffset: 0,
         phase: 0,
-        amplitude: 0,
+        amplitude: 0.4,
         offset: 0,
         polarity: 1,
         fmDepth: 0,
         fmRate: 0,
         mute: false,
         solo: false,
-        gain: 0,
+        gain: 1.0,
       },
       R4: {
         id: 'R4',
@@ -952,14 +965,14 @@ export function createDefaultOctaSystem(): OctaSystemState {
         baseFrequency: 0,
         quarterToneOffset: 0,
         phase: 0,
-        amplitude: 0,
+        amplitude: 0.25,
         offset: 0,
         polarity: 1,
         fmDepth: 0,
         fmRate: 0,
         mute: false,
         solo: false,
-        gain: 0,
+        gain: 1.0,
       },
     },
   };
@@ -970,6 +983,8 @@ export function createDefaultOctaSystem(): OctaSystemState {
  */
 export function applyOctaPreset(preset: PresetName, state: OctaSystemState): OctaSystemState {
   const next: OctaSystemState = JSON.parse(JSON.stringify(state));
+  next.mixerLeft.gain = next.mixerLeft.gain > 0 ? next.mixerLeft.gain : 1.0;
+  next.mixerRight.gain = next.mixerRight.gain > 0 ? next.mixerRight.gain : 1.0;
   const gens = next.generators;
 
   switch (preset) {
@@ -977,28 +992,28 @@ export function applyOctaPreset(preset: PresetName, state: OctaSystemState): Oct
       // The flagship preset: complex evolving quarter-tone beating geometry
       next.tuningMode = 'LOCKED';
       next.masterFrequency = 220;
-      gens.L1 = { ...gens.L1, enabled: true, mute: false, waveform: 'sine', quarterToneOffset: 0, amplitude: 0.8, phase: 0 };
-      gens.L2 = { ...gens.L2, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: 1, amplitude: 0.55, phase: 45 };
-      gens.L3 = { ...gens.L3, enabled: true, mute: false, waveform: 'triangle', quarterToneOffset: 5, amplitude: 0.4, phase: 90 };
-      gens.L4 = { ...gens.L4, enabled: true, mute: false, waveform: 'sawtooth_up', quarterToneOffset: -3, amplitude: 0.25, phase: 180 };
+      gens.L1 = { ...gens.L1, enabled: true, mute: false, waveform: 'sine', quarterToneOffset: 0, amplitude: 0.8, phase: 0, gain: 1.0 };
+      gens.L2 = { ...gens.L2, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: 1, amplitude: 0.55, phase: 45, gain: 1.0 };
+      gens.L3 = { ...gens.L3, enabled: true, mute: false, waveform: 'triangle', quarterToneOffset: 5, amplitude: 0.4, phase: 90, gain: 1.0 };
+      gens.L4 = { ...gens.L4, enabled: true, mute: false, waveform: 'sawtooth_up', quarterToneOffset: -3, amplitude: 0.25, phase: 180, gain: 1.0 };
 
-      gens.R1 = { ...gens.R1, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: 2, amplitude: 0.8, phase: 90 };
-      gens.R2 = { ...gens.R2, enabled: true, mute: false, waveform: 'sine', quarterToneOffset: -1, amplitude: 0.55, phase: 135 };
-      gens.R3 = { ...gens.R3, enabled: true, mute: false, waveform: 'triangle', quarterToneOffset: 7, amplitude: 0.4, phase: 0 };
-      gens.R4 = { ...gens.R4, enabled: true, mute: false, waveform: 'sawtooth_down', quarterToneOffset: 4, amplitude: 0.25, phase: 270 };
+      gens.R1 = { ...gens.R1, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: 2, amplitude: 0.8, phase: 0, gain: 1.0 };
+      gens.R2 = { ...gens.R2, enabled: true, mute: false, waveform: 'sine', quarterToneOffset: -1, amplitude: 0.55, phase: 135, gain: 1.0 };
+      gens.R3 = { ...gens.R3, enabled: true, mute: false, waveform: 'triangle', quarterToneOffset: 7, amplitude: 0.4, phase: 0, gain: 1.0 };
+      gens.R4 = { ...gens.R4, enabled: true, mute: false, waveform: 'sawtooth_down', quarterToneOffset: 4, amplitude: 0.25, phase: 270, gain: 1.0 };
       break;
     }
     case 'Microtonal Beats': {
       // Subtle circular beating and rotation from +/- 1 quarter-tone
       next.tuningMode = 'LOCKED';
       next.masterFrequency = 180;
-      gens.L1 = { ...gens.L1, enabled: true, mute: false, waveform: 'sine', quarterToneOffset: 0, amplitude: 0.8, phase: 0 };
-      gens.L2 = { ...gens.L2, enabled: true, mute: false, waveform: 'sine', quarterToneOffset: 1, amplitude: 0.7, phase: 90 };
+      gens.L1 = { ...gens.L1, enabled: true, mute: false, waveform: 'sine', quarterToneOffset: 0, amplitude: 0.8, phase: 0, gain: 1.0 };
+      gens.L2 = { ...gens.L2, enabled: true, mute: false, waveform: 'sine', quarterToneOffset: 1, amplitude: 0.7, phase: 90, gain: 1.0 };
       gens.L3 = { ...gens.L3, enabled: false, mute: false };
       gens.L4 = { ...gens.L4, enabled: false, mute: false };
 
-      gens.R1 = { ...gens.R1, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: 0, amplitude: 0.8, phase: 90 };
-      gens.R2 = { ...gens.R2, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: -1, amplitude: 0.7, phase: 0 };
+      gens.R1 = { ...gens.R1, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: 0, amplitude: 0.8, phase: 0, gain: 1.0 };
+      gens.R2 = { ...gens.R2, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: -1, amplitude: 0.7, phase: 0, gain: 1.0 };
       gens.R3 = { ...gens.R3, enabled: false, mute: false };
       gens.R4 = { ...gens.R4, enabled: false, mute: false };
       break;
@@ -1006,55 +1021,55 @@ export function applyOctaPreset(preset: PresetName, state: OctaSystemState): Oct
     case 'Octa-Lissajous': {
       // Multi-harmonic node Lissajous figures
       next.tuningMode = 'FREE';
-      gens.L1 = { ...gens.L1, enabled: true, mute: false, waveform: 'sine', baseFrequency: 110, quarterToneOffset: 0, amplitude: 0.7, phase: 0 };
-      gens.L2 = { ...gens.L2, enabled: true, mute: false, waveform: 'sine', baseFrequency: 220, quarterToneOffset: 0, amplitude: 0.5, phase: 45 };
-      gens.L3 = { ...gens.L3, enabled: true, mute: false, waveform: 'sine', baseFrequency: 330, quarterToneOffset: 0, amplitude: 0.35, phase: 90 };
-      gens.L4 = { ...gens.L4, enabled: true, mute: false, waveform: 'sine', baseFrequency: 440, quarterToneOffset: 0, amplitude: 0.2, phase: 180 };
+      gens.L1 = { ...gens.L1, enabled: true, mute: false, waveform: 'sine', baseFrequency: 110, quarterToneOffset: 0, amplitude: 0.7, phase: 0, gain: 1.0 };
+      gens.L2 = { ...gens.L2, enabled: true, mute: false, waveform: 'sine', baseFrequency: 220, quarterToneOffset: 0, amplitude: 0.5, phase: 45, gain: 1.0 };
+      gens.L3 = { ...gens.L3, enabled: true, mute: false, waveform: 'sine', baseFrequency: 330, quarterToneOffset: 0, amplitude: 0.35, phase: 90, gain: 1.0 };
+      gens.L4 = { ...gens.L4, enabled: true, mute: false, waveform: 'sine', baseFrequency: 440, quarterToneOffset: 0, amplitude: 0.2, phase: 180, gain: 1.0 };
 
-      gens.R1 = { ...gens.R1, enabled: true, mute: false, waveform: 'cosine', baseFrequency: 165, quarterToneOffset: 0, amplitude: 0.7, phase: 90 };
-      gens.R2 = { ...gens.R2, enabled: true, mute: false, waveform: 'cosine', baseFrequency: 275, quarterToneOffset: 0, amplitude: 0.5, phase: 135 };
-      gens.R3 = { ...gens.R3, enabled: true, mute: false, waveform: 'cosine', baseFrequency: 385, quarterToneOffset: 0, amplitude: 0.35, phase: 0 };
-      gens.R4 = { ...gens.R4, enabled: true, mute: false, waveform: 'cosine', baseFrequency: 495, quarterToneOffset: 0, amplitude: 0.2, phase: 270 };
+      gens.R1 = { ...gens.R1, enabled: true, mute: false, waveform: 'cosine', baseFrequency: 165, quarterToneOffset: 0, amplitude: 0.7, phase: 0, gain: 1.0 };
+      gens.R2 = { ...gens.R2, enabled: true, mute: false, waveform: 'cosine', baseFrequency: 275, quarterToneOffset: 0, amplitude: 0.5, phase: 45, gain: 1.0 };
+      gens.R3 = { ...gens.R3, enabled: true, mute: false, waveform: 'cosine', baseFrequency: 385, quarterToneOffset: 0, amplitude: 0.35, phase: 0, gain: 1.0 };
+      gens.R4 = { ...gens.R4, enabled: true, mute: false, waveform: 'cosine', baseFrequency: 495, quarterToneOffset: 0, amplitude: 0.2, phase: 90, gain: 1.0 };
       break;
     }
     case 'Sacred Lotus 8-Gen': {
       // Symmetrical 8-petal bloom with quarter-tone phase interference
       next.tuningMode = 'LOCKED';
       next.masterFrequency = 144;
-      gens.L1 = { ...gens.L1, enabled: true, mute: false, waveform: 'sine', quarterToneOffset: 0, amplitude: 0.75, phase: 0 };
-      gens.L2 = { ...gens.L2, enabled: true, mute: false, waveform: 'triangle', quarterToneOffset: 4, amplitude: 0.55, phase: 45 };
-      gens.L3 = { ...gens.L3, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: 8, amplitude: 0.4, phase: 90 };
-      gens.L4 = { ...gens.L4, enabled: true, mute: false, waveform: 'sawtooth_up', quarterToneOffset: 12, amplitude: 0.25, phase: 135 };
+      gens.L1 = { ...gens.L1, enabled: true, mute: false, waveform: 'sine', quarterToneOffset: 0, amplitude: 0.75, phase: 0, gain: 1.0 };
+      gens.L2 = { ...gens.L2, enabled: true, mute: false, waveform: 'triangle', quarterToneOffset: 4, amplitude: 0.55, phase: 45, gain: 1.0 };
+      gens.L3 = { ...gens.L3, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: 8, amplitude: 0.4, phase: 90, gain: 1.0 };
+      gens.L4 = { ...gens.L4, enabled: true, mute: false, waveform: 'sawtooth_up', quarterToneOffset: 12, amplitude: 0.25, phase: 135, gain: 1.0 };
 
-      gens.R1 = { ...gens.R1, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: 0, amplitude: 0.75, phase: 90 };
-      gens.R2 = { ...gens.R2, enabled: true, mute: false, waveform: 'triangle', quarterToneOffset: 4, amplitude: 0.55, phase: 135 };
-      gens.R3 = { ...gens.R3, enabled: true, mute: false, waveform: 'sine', quarterToneOffset: 8, amplitude: 0.4, phase: 180 };
-      gens.R4 = { ...gens.R4, enabled: true, mute: false, waveform: 'sawtooth_down', quarterToneOffset: 12, amplitude: 0.25, phase: 225 };
+      gens.R1 = { ...gens.R1, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: 0, amplitude: 0.75, phase: 0, gain: 1.0 };
+      gens.R2 = { ...gens.R2, enabled: true, mute: false, waveform: 'triangle', quarterToneOffset: 4, amplitude: 0.55, phase: 135, gain: 1.0 };
+      gens.R3 = { ...gens.R3, enabled: true, mute: false, waveform: 'sine', quarterToneOffset: 8, amplitude: 0.4, phase: 180, gain: 1.0 };
+      gens.R4 = { ...gens.R4, enabled: true, mute: false, waveform: 'sawtooth_down', quarterToneOffset: 12, amplitude: 0.25, phase: 225, gain: 1.0 };
       break;
     }
     case 'Harmonic Star': {
       next.tuningMode = 'LOCKED';
       next.masterFrequency = 200;
-      gens.L1 = { ...gens.L1, enabled: true, mute: false, waveform: 'sine', quarterToneOffset: 0, amplitude: 0.8, phase: 0 };
-      gens.L2 = { ...gens.L2, enabled: true, mute: false, waveform: 'triangle', quarterToneOffset: 6, amplitude: 0.5, phase: 60 };
-      gens.L3 = { ...gens.L3, enabled: true, mute: false, waveform: 'square', quarterToneOffset: -6, amplitude: 0.3, phase: 120 };
+      gens.L1 = { ...gens.L1, enabled: true, mute: false, waveform: 'sine', quarterToneOffset: 0, amplitude: 0.8, phase: 0, gain: 1.0 };
+      gens.L2 = { ...gens.L2, enabled: true, mute: false, waveform: 'triangle', quarterToneOffset: 6, amplitude: 0.5, phase: 60, gain: 1.0 };
+      gens.L3 = { ...gens.L3, enabled: true, mute: false, waveform: 'square', quarterToneOffset: -6, amplitude: 0.3, phase: 120, gain: 1.0 };
       gens.L4 = { ...gens.L4, enabled: false, mute: false };
 
-      gens.R1 = { ...gens.R1, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: 0, amplitude: 0.8, phase: 90 };
-      gens.R2 = { ...gens.R2, enabled: true, mute: false, waveform: 'triangle', quarterToneOffset: 6, amplitude: 0.5, phase: 150 };
-      gens.R3 = { ...gens.R3, enabled: true, mute: false, waveform: 'square', quarterToneOffset: -6, amplitude: 0.3, phase: 210 };
+      gens.R1 = { ...gens.R1, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: 0, amplitude: 0.8, phase: 0, gain: 1.0 };
+      gens.R2 = { ...gens.R2, enabled: true, mute: false, waveform: 'triangle', quarterToneOffset: 6, amplitude: 0.5, phase: 150, gain: 1.0 };
+      gens.R3 = { ...gens.R3, enabled: true, mute: false, waveform: 'square', quarterToneOffset: -6, amplitude: 0.3, phase: 210, gain: 1.0 };
       gens.R4 = { ...gens.R4, enabled: false, mute: false };
       break;
     }
     case 'Circle': {
       next.tuningMode = 'LOCKED';
       next.masterFrequency = 220;
-      gens.L1 = { ...gens.L1, enabled: true, mute: false, waveform: 'sine', quarterToneOffset: 0, amplitude: 0.8, phase: 0 };
+      gens.L1 = { ...gens.L1, enabled: true, mute: false, waveform: 'sine', quarterToneOffset: 0, amplitude: 0.8, phase: 0, gain: 1.0 };
       gens.L2 = { ...gens.L2, enabled: false };
       gens.L3 = { ...gens.L3, enabled: false };
       gens.L4 = { ...gens.L4, enabled: false };
 
-      gens.R1 = { ...gens.R1, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: 0, amplitude: 0.8, phase: 90 };
+      gens.R1 = { ...gens.R1, enabled: true, mute: false, waveform: 'cosine', quarterToneOffset: 0, amplitude: 0.8, phase: 0, gain: 1.0 };
       gens.R2 = { ...gens.R2, enabled: false };
       gens.R3 = { ...gens.R3, enabled: false };
       gens.R4 = { ...gens.R4, enabled: false };
@@ -1062,12 +1077,12 @@ export function applyOctaPreset(preset: PresetName, state: OctaSystemState): Oct
     }
     case 'Lissajous': {
       next.tuningMode = 'FREE';
-      gens.L1 = { ...gens.L1, enabled: true, mute: false, waveform: 'sine', baseFrequency: 220, quarterToneOffset: 0, amplitude: 0.8, phase: 0 };
+      gens.L1 = { ...gens.L1, enabled: true, mute: false, waveform: 'sine', baseFrequency: 220, quarterToneOffset: 0, amplitude: 0.8, phase: 0, gain: 1.0 };
       gens.L2 = { ...gens.L2, enabled: false };
       gens.L3 = { ...gens.L3, enabled: false };
       gens.L4 = { ...gens.L4, enabled: false };
 
-      gens.R1 = { ...gens.R1, enabled: true, mute: false, waveform: 'sine', baseFrequency: 330, quarterToneOffset: 0, amplitude: 0.8, phase: 90 };
+      gens.R1 = { ...gens.R1, enabled: true, mute: false, waveform: 'sine', baseFrequency: 330, quarterToneOffset: 0, amplitude: 0.8, phase: 90, gain: 1.0 };
       gens.R2 = { ...gens.R2, enabled: false };
       gens.R3 = { ...gens.R3, enabled: false };
       gens.R4 = { ...gens.R4, enabled: false };
@@ -1181,4 +1196,207 @@ export function generateOctaXYPoints(
 
   return points;
 }
+
+/**
+ * Robust Ray-Casting algorithm for testing if a 2D point is inside a closed or semi-closed polygon
+ */
+export function isPointInContourPolygon(point: [number, number], polygon: Array<[number, number]>): boolean {
+  if (!polygon || polygon.length < 3) return false;
+  const [x, y] = point;
+  let inside = false;
+
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i][0];
+    const yi = polygon[i][1];
+    const xj = polygon[j][0];
+    const yj = polygon[j][1];
+
+    // Check if segment has significant length (avoid teleport glitch lines)
+    const segLenSq = (xj - xi) ** 2 + (yj - yi) ** 2;
+    if (segLenSq > 1.8) continue; // Skip long jump lines
+
+    const intersect = (yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi + 1e-12) + xi;
+    if (intersect) inside = !inside;
+  }
+
+  return inside;
+}
+
+/**
+ * Calculates Bounding Box and Centroid of a contour
+ */
+export function getContourBoundingBox(polygon: Array<[number, number]>): {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  cx: number;
+  cy: number;
+} {
+  if (!polygon || polygon.length === 0) {
+    return { minX: -0.5, maxX: 0.5, minY: -0.5, maxY: 0.5, cx: 0, cy: 0 };
+  }
+
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  let sumX = 0;
+  let sumY = 0;
+  let count = 0;
+
+  for (const [x, y] of polygon) {
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      minX = Math.min(minX, x);
+      maxX = Math.max(maxX, x);
+      minY = Math.min(minY, y);
+      maxY = Math.max(maxY, y);
+      sumX += x;
+      sumY += y;
+      count++;
+    }
+  }
+
+  if (count === 0) {
+    return { minX: -0.5, maxX: 0.5, minY: -0.5, maxY: 0.5, cx: 0, cy: 0 };
+  }
+
+  return {
+    minX,
+    maxX,
+    minY,
+    maxY,
+    cx: sumX / count,
+    cy: sumY / count,
+  };
+}
+
+export interface BouncingNoiseParticle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  life: number;
+}
+
+/**
+ * Simulates White Noise Electron Beam Particles Bouncing strictly inside the polygon contour
+ * (E.g. Lapin blanc, Papillon, Mandala, etc.)
+ */
+export function updateAndGenerateContourNoise(
+  polygon: Array<[number, number]>,
+  particlesRef: BouncingNoiseParticle[],
+  targetCount: number,
+  freqHz: number,
+  bounceSpeed: number,
+  bounceMode: 'specular' | 'stochastic' | 'quantum_diffuse' = 'specular',
+  dt: number = 0.016
+): Array<{ x: number; y: number; brightness: number }> {
+  if (!polygon || polygon.length < 3) return [];
+
+  const bbox = getContourBoundingBox(polygon);
+  const width = Math.max(0.05, bbox.maxX - bbox.minX);
+  const height = Math.max(0.05, bbox.maxY - bbox.minY);
+
+  // 1. Calculate sound energy based on average distance from polygon points to their center.
+  // Full scale sounds have points stretching to margins (~0.4 - 0.7 radius).
+  // Quiet or muted sounds will collapse near 0.
+  let totalDist = 0;
+  for (let i = 0; i < polygon.length; i++) {
+    totalDist += Math.hypot(polygon[i][0] - bbox.cx, polygon[i][1] - bbox.cy);
+  }
+  const avgRadius = totalDist / polygon.length;
+  // soundEnergy will scale from 0.0 up to ~1.5 depending on amplitude
+  const soundEnergy = Math.max(0.0, Math.min(2.0, avgRadius / 0.35));
+
+  const spawnAtCenter = (): { x: number, y: number, vx: number, vy: number, life: number } => {
+    let px = bbox.cx;
+    let py = bbox.cy;
+    // Spawn concentrated near the center (expanding universe logic)
+    for (let attempts = 0; attempts < 15; attempts++) {
+      const u = Math.random();
+      const r = Math.pow(u, 4) * 0.5; // heavily weighted towards center (0)
+      const a = Math.random() * Math.PI * 2;
+      const rx = bbox.cx + Math.cos(a) * r * width;
+      const ry = bbox.cy + Math.sin(a) * r * height;
+      if (isPointInContourPolygon([rx, ry], polygon)) {
+        px = rx;
+        py = ry;
+        break;
+      }
+    }
+    const angle = Math.random() * Math.PI * 2;
+    // Velocity is directed outwards from center and is scaled by the sound energy
+    const spd = (0.2 + Math.random() * 0.8) * bounceSpeed * 1.8 * Math.max(0.1, soundEnergy);
+    return {
+      x: px,
+      y: py,
+      vx: Math.cos(angle) * spd,
+      vy: Math.sin(angle) * spd,
+      life: Math.random(),
+    };
+  };
+
+  // Maintain particle pool
+  const count = Math.max(30, Math.min(2000, targetCount));
+  while (particlesRef.length < count) {
+    particlesRef.push(spawnAtCenter());
+  }
+  if (particlesRef.length > count) {
+    particlesRef.length = count;
+  }
+
+  const freqFactor = Math.min(5.0, Math.max(0.5, Math.log10(Math.max(100, freqHz)) * 0.7));
+  const effectiveDt = dt * freqFactor;
+  const resultPoints: Array<{ x: number; y: number; brightness: number }> = [];
+
+  for (let i = 0; i < particlesRef.length; i++) {
+    const p = particlesRef[i];
+    
+    // Jitter scales directly with the sound energy
+    const jitterMag = (0.005 * freqFactor) * soundEnergy;
+    const jx = (Math.random() - 0.5) * jitterMag;
+    const jy = (Math.random() - 0.5) * jitterMag;
+
+    // Movement velocity is scaled by sound energy (they move/flicker faster with sound, calm when silent)
+    let nextX = p.x + p.vx * effectiveDt * soundEnergy + jx;
+    let nextY = p.y + p.vy * effectiveDt * soundEnergy + jy;
+
+    // Test if next position is inside the contour
+    if (!isPointInContourPolygon([nextX, nextY], polygon)) {
+       // Universe boundary reached -> respawn at center
+       const fresh = spawnAtCenter();
+       p.x = fresh.x;
+       p.y = fresh.y;
+       p.vx = fresh.vx;
+       p.vy = fresh.vy;
+       p.life = 0;
+    } else {
+       p.x = nextX;
+       p.y = nextY;
+       // Life progression scales with sound energy
+       p.life = (p.life + effectiveDt * 2 * (0.2 + 0.8 * soundEnergy)) % 1;
+    }
+    
+    // Calculate brightness: dimmer as they move further away (distancing energy)
+    const dx = p.x - bbox.cx;
+    const dy = p.y - bbox.cy;
+    const dist = Math.hypot(dx, dy);
+    const maxRadius = Math.max(width, height) * 0.5;
+    const normDist = Math.min(1.0, dist / Math.max(0.001, maxRadius));
+    
+    // Bright in center, fading out exponentially towards edges
+    const distanceFade = Math.pow(1.0 - normDist, 1.5);
+    const bright = Math.max(0.05, distanceFade) * (0.5 + 0.5 * Math.sin(p.life * Math.PI)) * (0.2 + 0.8 * soundEnergy);
+
+    resultPoints.push({
+      x: p.x,
+      y: p.y,
+      brightness: bright,
+    });
+  }
+
+  return resultPoints;
+}
+
 

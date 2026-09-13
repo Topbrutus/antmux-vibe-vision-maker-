@@ -82,20 +82,21 @@ class SignalGenerator:
 
     def generate_waveform(self, wave_type: str, phase: np.ndarray) -> np.ndarray:
         norm_phase = np.mod(phase, 2 * np.pi)
-        if wave_type == "sine":
+        wt = str(wave_type).lower().strip()
+        if wt in ["sine", "sinus"]:
             return np.sin(norm_phase)
-        elif wave_type == "cosine":
+        elif wt in ["cosine", "cosinus"]:
             return np.cos(norm_phase)
-        elif wave_type == "triangle":
+        elif wt in ["triangle", "triangulaire"]:
             p = norm_phase / (2 * np.pi)
             return 4 * np.abs(p - np.floor(p + 0.75) + 0.25) - 1
-        elif wave_type == "square":
+        elif wt in ["square", "carre", "carré"]:
             return np.where(norm_phase < np.pi, 1.0, -1.0)
-        elif wave_type == "sawtooth_up":
+        elif wt in ["sawtooth_up", "dent_de_scie_montante", "saw"]:
             return (norm_phase / np.pi) - 1.0
-        elif wave_type == "sawtooth_down":
+        elif wt in ["sawtooth_down", "dent_de_scie_descendante"]:
             return 1.0 - (norm_phase / np.pi)
-        elif wave_type == "noise":
+        elif wt in ["noise", "bruit"]:
             return np.random.uniform(-1.0, 1.0, size=phase.shape)
         return np.sin(norm_phase)
 

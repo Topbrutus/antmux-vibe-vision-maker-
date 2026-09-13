@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   ChannelConfig,
   ScopeDisplaySettings,
@@ -24,7 +24,8 @@ import {
   MicrophoneChannelConfig,
   PatternItem,
   ScopeActiveToggles,
-  TabActivityLevels
+  TabActivityLevels,
+  TabMixerChannel
 } from './types/vectorScope';
 import { VectorAudioEngine } from './services/audioEngine';
 import {
@@ -39,6 +40,11 @@ import {
 } from './services/mathEngine';
 import { triggerBlobDownload } from './services/exportUtils';
 import { downloadWindowsZip } from './services/pythonAppFiles';
+import {
+  autoSaveCurrentSession,
+  getAutoSavedSession,
+  clearAutoSavedSession
+} from './services/sessionStorage';
 
 import { Header } from './components/Header';
 import { ChannelZone } from './components/ChannelZone';
@@ -47,6 +53,7 @@ import { ZoneDGenerator } from './components/ZoneDGenerator';
 import { OctaGeneratorCard } from './components/OctaGeneratorCard';
 import { OctaMixerPanel } from './components/OctaMixerPanel';
 import { OctaModulationMatrix } from './components/OctaModulationMatrix';
+import { MasterMixerPanel } from './components/MasterMixerPanel';
 import { SessionManager } from './components/SessionManager';
 import { MandalaComposer } from './components/MandalaComposer';
 import { VortexDesigner, VortexParams } from './components/VortexDesigner';
@@ -58,6 +65,7 @@ import { GenesisMode } from './components/GenesisMode';
 import { ExportModal } from './components/ExportModal';
 
 import { FloatingScopeWindow } from './components/FloatingScopeWindow';
+import { SnappableScopeWindow } from './components/SnappableScopeWindow';
 import { SegmentedGenerators } from './components/SegmentedGenerators';
 import { VideoVectorLab } from './components/VideoVectorLab';
 import { VectorTextLab } from './components/VectorTextLab';
@@ -74,12 +82,12 @@ import { Bot, Sparkles, MessageSquare } from 'lucide-react';
 
 const INITIAL_CONFIG_X: ChannelConfig = {
   waveform: 'sine',
-  frequency: 0,
-  amplitude: 0,
+  frequency: 220,
+  amplitude: 0.8,
   phase: 0,
   offset: 0,
   polarity: 1,
-  gain: 0,
+  gain: 1.0,
   mute: false,
   solo: false,
   fmDepth: 0,
@@ -88,13 +96,13 @@ const INITIAL_CONFIG_X: ChannelConfig = {
 };
 
 const INITIAL_CONFIG_Y: ChannelConfig = {
-  waveform: 'sine',
-  frequency: 0,
-  amplitude: 0,
+  waveform: 'cosine',
+  frequency: 220,
+  amplitude: 0.8,
   phase: 0,
   offset: 0,
   polarity: 1,
-  gain: 0,
+  gain: 1.0,
   mute: false,
   solo: false,
   fmDepth: 0,
@@ -215,12 +223,100 @@ const DEFAULT_MANDALA_LAYERS: MandalaLayer[] = [
   },
 ];
 
+const DEFAULT_TAB_CHANNELS: Record<AppMode, TabMixerChannel> = {
+  main: { id: 'main', name: 'Laboratoire X/Y', category: 'Oscillateurs Octa', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#00f5d4' },
+  mixer: { id: 'mixer', name: 'Mixeur Master', category: 'Master Bus', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#38bdf8' },
+  sequence_generators: { id: 'sequence_generators', name: 'Générateurs Vidéo', category: 'Séquences & Lapin', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#f43f5e' },
+  piano: { id: 'piano', name: 'Piano & Notes', category: 'Synth Solfeggio', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#eab308' },
+  radio: { id: 'radio', name: 'Radio & Chanson', category: 'Lecteur Audio', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#ec4899' },
+  mics: { id: 'mics', name: 'Double Micro', category: 'Entrée Directe', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#8b5cf6' },
+  patterns: { id: 'patterns', name: 'Bibliothèque Motifs', category: 'Vecteurs & Lapin', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#10b981' },
+  matrix: { id: 'matrix', name: 'Matrice Modulation', category: 'FM / AM Matrix', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#6366f1' },
+  sessions: { id: 'sessions', name: 'Sessions & Presets', category: 'Sauvegardes', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#06b6d4' },
+  segmented: { id: 'segmented', name: '4/8 Générateurs', category: 'Synth Harmonique', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#14b8a6' },
+  image_lab: { id: 'image_lab', name: 'Vidéo & Image', category: 'Vectoriseur', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#f97316' },
+  text_lab: { id: 'text_lab', name: 'Texte Animé', category: 'Typographie', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#a855f7' },
+  timeline: { id: 'timeline', name: 'Timeline & Scènes', category: 'Automation', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#ef4444' },
+  mandala: { id: 'mandala', name: 'Mandala Composer', category: 'Art Sacré', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#fbbf24' },
+  mandala_directory: { id: 'mandala_directory', name: 'Annuaire Mandala', category: 'Catalogue', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#fbbf24' },
+  spectral: { id: 'spectral', name: 'Labo Spectral', category: 'Analyse FFT', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#3b82f6' },
+  vortex: { id: 'vortex', name: 'Vortex Designer', category: 'Dynamique 3D', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#06b6d4' },
+  comparator: { id: 'comparator', name: 'Comparateur', category: 'Mesures', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#64748b' },
+  real_scope: { id: 'real_scope', name: 'Calibration Oscillo', category: 'Hardware', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#22c55e' },
+  genesis: { id: 'genesis', name: 'Expérience Genesis', category: 'Master Synth', isPaused: false, isMuted: false, inMixer: true, volume: 1.0, pan: 0, solo: false, activityLevel: 0, color: '#e11d48' },
+};
+
 export default function App() {
   const [appMode, setAppMode] = useState<AppMode>('main');
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [masterVolume, setMasterVolume] = useState<number>(0.7);
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [isClipping, setIsClipping] = useState<boolean>(false);
+
+  // Tab Mixer & Concurrency State
+  const [tabChannels, setTabChannels] = useState<Record<AppMode, TabMixerChannel>>(DEFAULT_TAB_CHANNELS);
+  const [masterMute, setMasterMute] = useState<boolean>(false);
+  const [autoNormalizeMixer, setAutoNormalizeMixer] = useState<boolean>(true);
+
+  // Rabbit & Burrow dual zone visualization state for Mixer & Sequences
+  const [rabbitDualZone, setRabbitDualZone] = useState({
+    enabled: true,
+    primaryColor: '#ffffff',
+    earsColor: '#ffb3c6',
+    burrowColor: '#8b4513',
+    noiseEnabled: true,
+    noiseFrequency: 440,
+    noiseDensity: 400,
+    noiseBounceSpeed: 1.0,
+  });
+
+  const handleUpdateTabChannel = (id: AppMode, updates: Partial<TabMixerChannel>) => {
+    setTabChannels((prev) => {
+      const current = prev[id] || DEFAULT_TAB_CHANNELS[id];
+      const nextChan = { ...current, ...updates };
+      const next = { ...prev, [id]: nextChan };
+
+      // Propagate mute/pause to audio engine components if needed
+      if (engineRef.current) {
+        engineRef.current.updateTabChannels(next);
+
+        if (id === 'radio') {
+          if (updates.isMuted !== undefined) {
+            engineRef.current.updateRadioConfig({ mute: updates.isMuted });
+          }
+          if (updates.isPaused !== undefined) {
+            if (updates.isPaused) {
+              engineRef.current.pauseRadioAudio();
+            } else if (isPlaying) {
+              engineRef.current.playRadioAudio();
+            }
+          }
+        }
+        if (id === 'mics') {
+          if (updates.isMuted !== undefined || updates.isPaused !== undefined) {
+            const isMutedOrPaused = nextChan.isMuted || nextChan.isPaused;
+            engineRef.current.updateMicrophoneConfig('mic1', { mute: isMutedOrPaused });
+            engineRef.current.updateMicrophoneConfig('mic2', { mute: isMutedOrPaused });
+          }
+        }
+      }
+
+      return next;
+    });
+  };
+
+  const handleBatchUpdateTabChannels = (updates: Partial<TabMixerChannel>) => {
+    setTabChannels((prev) => {
+      const next = { ...prev };
+      (Object.keys(next) as AppMode[]).forEach((key) => {
+        next[key] = { ...next[key], ...updates };
+      });
+      if (engineRef.current) {
+        engineRef.current.updateTabChannels(next);
+      }
+      return next;
+    });
+  };
 
   // Channels state
   const [configX, setConfigX] = useState<ChannelConfig>(INITIAL_CONFIG_X);
@@ -255,6 +351,26 @@ export default function App() {
     width: 520,
     height: 520,
   });
+
+  // Snappable Scope & Spectral Window State (Global across all tabs & modes)
+  const [isSnappableScopeOpen, setIsSnappableScopeOpen] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('genesis_global_snappable_open');
+      return saved === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const toggleGlobalSnappableScope = () => {
+    setIsSnappableScopeOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('genesis_global_snappable_open', next.toString());
+      } catch {}
+      return next;
+    });
+  };
 
   // Scope Pause State for line picking/deleting
   const [isScopePaused, setIsScopePaused] = useState<boolean>(false);
@@ -372,6 +488,8 @@ export default function App() {
   const [activityLevels, setActivityLevels] = useState<TabActivityLevels>({
     main: 0,
     sequence_generators: 0,
+    piano: 0,
+    mandala_directory: 0,
     segmented: 0,
     matrix: 0,
     radio: 0,
@@ -387,7 +505,6 @@ export default function App() {
     comparator: 0,
     real_scope: 0,
     genesis: 0,
-    piano: 0,
   });
 
   // Active loaded pattern ID
@@ -399,10 +516,55 @@ export default function App() {
     return saved ? parseFloat(saved) || 1.0 : 1.0;
   });
 
+  // CERN Physics Relativistic Engine State
+  const [relativisticEnabled, setRelativisticEnabled] = useState<boolean>(false);
+  const [speedOfLightLimit, setSpeedOfLightLimit] = useState<number>(300);
+  const [gravitationalDilationDepth, setGravitationalDilationDepth] = useState<number>(0.4);
+
   useEffect(() => {
     document.documentElement.style.setProperty('--font-scale', fontScale.toString());
     localStorage.setItem('gv_font_scale', fontScale.toString());
   }, [fontScale]);
+
+  // Restore autosaved session on initial mount
+  const hasRestoredAutosave = useRef<boolean>(false);
+  useEffect(() => {
+    if (!hasRestoredAutosave.current) {
+      hasRestoredAutosave.current = true;
+      const autosaved = getAutoSavedSession();
+      if (autosaved) {
+        handleRestoreSession(autosaved);
+      }
+    }
+  }, []);
+
+  // Autosave session on state change and when switching tabs/backgrounding
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      const data = getSessionData();
+      autoSaveCurrentSession(data);
+    }, 1000);
+
+    return () => clearTimeout(timeout);
+  }, [configX, configY, segmentedX, segmentedY, octaState, currentPreset, scopeSettings, timelineScenes, isTextActiveInAudio]);
+
+  // Handle visibility change / backgrounding
+  useEffect(() => {
+    const handleVisibilityOrUnload = () => {
+      const data = getSessionData();
+      autoSaveCurrentSession(data);
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityOrUnload);
+    window.addEventListener('pagehide', handleVisibilityOrUnload);
+    window.addEventListener('beforeunload', handleVisibilityOrUnload);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityOrUnload);
+      window.removeEventListener('pagehide', handleVisibilityOrUnload);
+      window.removeEventListener('beforeunload', handleVisibilityOrUnload);
+    };
+  }, [configX, configY, segmentedX, segmentedY, octaState, currentPreset, scopeSettings, timelineScenes, isTextActiveInAudio]);
 
   // AI Chat and Virtual Cursor Co-pilot state
   const [isAiChatOpen, setIsAiChatOpen] = useState<boolean>(false);
@@ -495,9 +657,9 @@ export default function App() {
 
       setGhostCursorState({
         isVisible: true,
-        xRatio: Math.max(0.08, Math.min(0.92, targetWp.x + jitterX)),
-        yRatio: Math.max(0.12, Math.min(0.88, targetWp.y + jitterY)),
-        label: targetWp.label,
+        xRatio: Math.max(0.08, Math.min(0.92, (targetWp?.x || 0.5) + jitterX)),
+        yRatio: Math.max(0.12, Math.min(0.88, (targetWp?.y || 0.5) + jitterY)),
+        label: targetWp?.label || 'Action Vectorielle',
         isClicking: willClick,
         timeLeftSec: Math.max(0, remaining),
       });
@@ -519,6 +681,8 @@ export default function App() {
   useEffect(() => {
     const engine = new VectorAudioEngine(INITIAL_CONFIG_X, INITIAL_CONFIG_Y);
     engine.setOctaState(octaState);
+    engine.updateTabChannels(tabChannels);
+    engine.setAppMode(appMode);
     engineRef.current = engine;
 
     engine.onClippingWarning = () => {
@@ -534,12 +698,37 @@ export default function App() {
     };
   }, []);
 
+  // Sync active appMode (tab) to engine
+  useEffect(() => {
+    if (engineRef.current) {
+      engineRef.current.setAppMode(appMode);
+    }
+  }, [appMode]);
+
+  // Sync tab mixer channels to engine
+  useEffect(() => {
+    if (engineRef.current) {
+      engineRef.current.updateTabChannels(tabChannels);
+    }
+  }, [tabChannels]);
+
   // Sync volume
   useEffect(() => {
     if (engineRef.current) {
       engineRef.current.setMasterVolume(masterVolume);
     }
   }, [masterVolume]);
+
+  // Sync relativistic state to engine
+  useEffect(() => {
+    if (engineRef.current) {
+      engineRef.current.setRelativisticSettings(
+        relativisticEnabled,
+        speedOfLightLimit,
+        gravitationalDilationDepth
+      );
+    }
+  }, [relativisticEnabled, speedOfLightLimit, gravitationalDilationDepth]);
 
   // Sync octaState to engine
   useEffect(() => {
@@ -663,10 +852,13 @@ export default function App() {
     const updateLoop = () => {
       const engine = engineRef.current;
       if (engine) {
+        // Refresh FFT and time domain analysers from Web Audio thread
+        engine.updateBuffers();
+
         // Read buffers
         if (engine.xyPoints && engine.xyPoints.length > 5) {
           setXyPoints(engine.xyPoints);
-        } else {
+        } else if (engine.getSynthesisMode() !== 'vector_path') {
           const pts = generateOctaXYPoints(octaState, 600, performance.now() * 0.001);
           setXyPoints(pts);
         }
@@ -725,6 +917,9 @@ export default function App() {
 
         setActivityLevels({
           main: synthLevel,
+          sequence_generators: synthLevel,
+          piano: synthLevel,
+          mandala_directory: synthLevel,
           segmented: isSegmentedActiveInAudio ? synthLevel : 0,
           matrix: synthLevel,
           radio: radLevel,
@@ -751,7 +946,7 @@ export default function App() {
   }, [octaState, isSegmentedActiveInAudio, isImageActiveInAudio, isTextActiveInAudio, isTimelineActiveInAudio]);
 
   // Audio start/pause toggle
-  const handleTogglePlay = async () => {
+  const handleTogglePlay = useCallback(async () => {
     if (!engineRef.current) return;
     if (!isPlaying) {
       await engineRef.current.initAudio();
@@ -761,7 +956,7 @@ export default function App() {
       engineRef.current.stopAudio();
       setIsPlaying(false);
     }
-  };
+  }, [isPlaying]);
 
   // Recording toggle
   const handleToggleRecord = () => {
@@ -869,15 +1064,38 @@ export default function App() {
   };
 
   // Pattern Library action: Load pattern to oscilloscope
-  const handleLoadPatternToScope = (pattern: PatternItem) => {
-    if (!engineRef.current) return;
+  const handleLoadPatternToScope = useCallback((pattern: PatternItem) => {
+    if (!engineRef.current || !pattern) return;
     setActivePatternId(pattern.id);
-    setXyPoints(pattern.points);
-    engineRef.current.setCustomVectorPath(pattern.points, 60);
+    const pts = pattern.points || [];
+    setXyPoints(pts);
+    const patColor = pattern.color || '#ffffff';
+    setScopeSettings((prev) => ({
+      ...prev,
+      primaryColor: patColor,
+      colorScheme: 'custom',
+      fillChannels: pattern.fillChannels || [],
+      segmentColors: pattern.segmentColors || {},
+      pointColors: pattern.pointColors || [],
+    }));
+
+    let ptColors = pattern.pointColors || [];
+    if (ptColors.length === 0 && pts.length > 0) {
+      const N = pts.length;
+      const segColors = pattern.segmentColors || {};
+      const stepSize = Math.max(1, Math.floor(N / 40));
+      ptColors = new Array(N);
+      for (let i = 0; i < N; i++) {
+        const segIdx = Math.floor(i / stepSize);
+        ptColors[i] = segColors[segIdx] || patColor;
+      }
+    }
+
+    engineRef.current.setCustomVectorPath(pts, 60, ptColors);
     engineRef.current.setSynthesisMode('vector_path');
     setSourceLabel(`MOTIF : ${pattern.name}`);
     if (!isPlaying) handleTogglePlay();
-  };
+  }, [isPlaying, handleTogglePlay]);
 
   // External audio file selection
   const handleAudioFileSelected = async (file: File) => {
@@ -990,7 +1208,7 @@ export default function App() {
   const handleSendImageToScope = (points: Array<[number, number]>, name: string) => {
     if (!engineRef.current) return;
     setVectorImagePoints(points);
-    engineRef.current.setCustomVectorPath(points, 60);
+    engineRef.current.setCustomVectorPath(points || [], 60);
     engineRef.current.setSynthesisMode('vector_path');
     setIsImageActiveInAudio(true);
     setIsSegmentedActiveInAudio(false);
@@ -1004,7 +1222,7 @@ export default function App() {
   const handleSendTextToScope = (points: Array<[number, number]>, text: string) => {
     if (!engineRef.current) return;
     setVectorTextPoints(points);
-    engineRef.current.setCustomVectorPath(points, 60);
+    engineRef.current.setCustomVectorPath(points || [], 60);
     engineRef.current.setSynthesisMode('vector_path');
     setIsTextActiveInAudio(true);
     setIsImageActiveInAudio(false);
@@ -1016,8 +1234,9 @@ export default function App() {
 
   // Inject Timeline Frame into Oscilloscope & Audio
   const handleSendTimelineToScope = (points: Array<[number, number]>, sceneLabel: string) => {
+    setXyPoints(points || []);
     if (!engineRef.current) return;
-    engineRef.current.setCustomVectorPath(points, 60);
+    engineRef.current.setCustomVectorPath(points || [], 60);
     engineRef.current.setSynthesisMode('vector_path');
     setIsTimelineActiveInAudio(true);
     setIsTextActiveInAudio(false);
@@ -1028,6 +1247,15 @@ export default function App() {
 
   // Apply Vortex to Scope
   const handleApplyVortex = (vortexParams: VortexParams) => {
+    const pts = generateVortexPoints(vortexParams, 600);
+    setXyPoints(pts);
+
+    if (engineRef.current) {
+      engineRef.current.setCustomVectorPath(pts, 60);
+      engineRef.current.updateConfig('x', { frequency: vortexParams.baseFreq, amplitude: 0.85, phase: 0 });
+      engineRef.current.updateConfig('y', { frequency: vortexParams.baseFreq, amplitude: 0.85, phase: 90 + vortexParams.phaseDrift });
+    }
+
     setConfigX((prev) => ({
       ...prev,
       waveform: 'sine',
@@ -1048,6 +1276,9 @@ export default function App() {
       persistence: 0.82,
     }));
     setSourceLabel('VORTEX GÉOMÉTRIQUE');
+    setIsImageActiveInAudio(false);
+    setIsTextActiveInAudio(false);
+    setIsSegmentedActiveInAudio(false);
   };
 
   const handleGenerateHarmonicMandala = () => {
@@ -1110,7 +1341,18 @@ export default function App() {
     currentPreset,
     timelineScenes,
     scopeSettings,
+    masterMixerState: {
+      channels: tabChannels,
+      masterVolume,
+      masterMute,
+      autoNormalize: autoNormalizeMixer,
+      rabbitDualZone,
+    },
   });
+
+  const lissajousPoints = useMemo(() => {
+    return generateLissajousPoints(configX.frequency, configY.frequency, configX.phase, configY.phase, 512);
+  }, [configX.frequency, configY.frequency, configX.phase, configY.phase]);
 
   const handleRestoreSession = (session: GenesisSessionData) => {
     if (session.configX) setConfigX(session.configX);
@@ -1126,9 +1368,17 @@ export default function App() {
         engineRef.current.setOctaState(session.octaState);
       }
     }
+    if (session.masterMixerState) {
+      if (session.masterMixerState.channels) setTabChannels(session.masterMixerState.channels);
+      if (session.masterMixerState.masterVolume !== undefined) setMasterVolume(session.masterMixerState.masterVolume);
+      if (session.masterMixerState.masterMute !== undefined) setMasterMute(session.masterMixerState.masterMute);
+      if (session.masterMixerState.autoNormalize !== undefined) setAutoNormalizeMixer(session.masterMixerState.autoNormalize);
+      if (session.masterMixerState.rabbitDualZone) setRabbitDualZone(session.masterMixerState.rabbitDualZone);
+    }
   };
 
   const handleResetAllToZero = () => {
+    clearAutoSavedSession();
     setConfigX({ ...INITIAL_CONFIG_X });
     setConfigY({ ...INITIAL_CONFIG_Y });
     setSegmentedX({ ...DEFAULT_SEGMENTED_X });
@@ -1170,7 +1420,7 @@ export default function App() {
         fontSize: `${fontScale}rem`,
       }}
     >
-      {/* Header with Transport, Scope Toggles & Audio Activity Indicators */}
+      {/* Header with Transport, Scope Toggles, Tab Pause/Mute Controls & Audio Activity Indicators */}
       <Header
         appMode={appMode}
         setAppMode={setAppMode}
@@ -1201,7 +1451,34 @@ export default function App() {
         onDecreaseFont={handleDecreaseFont}
         onResetFont={handleResetFont}
         onOpenAiChat={() => setIsAiChatOpen(true)}
+        isSnappableScopeOpen={isSnappableScopeOpen}
+        onToggleSnappableScope={toggleGlobalSnappableScope}
+        tabChannels={tabChannels}
+        onUpdateTabChannel={handleUpdateTabChannel}
       />
+
+      {/* Snappable & Detachable Scope & Spectral Visualizer (Rendered anywhere on screen when enabled) */}
+      {isSnappableScopeOpen && (
+        <SnappableScopeWindow
+          points={xyPoints}
+          settings={scopeSettings}
+          onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+          freqDataX={freqDataX}
+          freqDataY={freqDataY}
+          rawTimeDataX={rawTimeDataX}
+          rawTimeDataY={rawTimeDataY}
+          sampleRate={engineRef.current?.getSampleRate() || 48000}
+          presetName={currentPreset}
+          isPaused={isScopePaused}
+          onTogglePause={() => setIsScopePaused(!isScopePaused)}
+          currentLabel={sourceLabel}
+          isPlaying={isPlaying}
+          onTogglePlay={handleTogglePlay}
+          onNavigateToSource={(mode) => setAppMode(mode)}
+          defaultSnap="top_right"
+          onClose={() => setIsSnappableScopeOpen(false)}
+        />
+      )}
 
       {/* Floating Oscilloscope Window (Rendered anywhere on screen when detached) */}
       {floatingScopeState.isFloating && (
@@ -1219,9 +1496,8 @@ export default function App() {
       {/* Main Working View */}
       <main className="flex-1 p-3 sm:p-4 max-w-[1920px] w-full mx-auto space-y-4">
         {/* Tab 1: Studio View: 8-Generator Matrix (Left: A, C, E, G / Center: Scope & Mixers / Right: B, D, F, H) */}
-        {appMode === 'main' && (
-          <div className="space-y-4">
-            <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-start">
+        <div className={appMode === 'main' ? 'space-y-4' : 'hidden'}>
+  <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-start">
               {/* Left Column (Axe X): Zone A (L1), Zone C (L2), Zone E (L3), Zone G (L4) */}
               <div className="xl:col-span-3 space-y-3">
                 <div className="bg-[#040914] border border-cyan-950 px-3 py-2 rounded-lg flex items-center justify-between">
@@ -1391,17 +1667,69 @@ export default function App() {
               </div>
             </div>
           </div>
-        )}
+
+        {/* Tab 2: MIXEUR MASTER & CONCURRENCE MULTI-ONGLETS */}
+        <div className={appMode === 'mixer' ? '' : 'hidden'}>
+          <MasterMixerPanel
+            channels={tabChannels}
+            onUpdateChannel={handleUpdateTabChannel}
+            onBatchUpdateChannels={handleBatchUpdateTabChannels}
+            masterVolume={masterVolume}
+            onMasterVolumeChange={(vol) => {
+              setMasterVolume(vol);
+              if (engineRef.current) engineRef.current.setMasterVolume(vol);
+            }}
+            masterMute={masterMute}
+            onToggleMasterMute={() => {
+              setMasterMute((prev) => {
+                const next = !prev;
+                if (engineRef.current) {
+                  engineRef.current.setMasterVolume(next ? 0 : masterVolume);
+                }
+                return next;
+              });
+            }}
+            autoNormalize={autoNormalizeMixer}
+            onToggleAutoNormalize={() => setAutoNormalizeMixer(!autoNormalizeMixer)}
+            onNavigateToTab={(mode) => setAppMode(mode)}
+            compositePoints={xyPoints}
+            scopeSettings={scopeSettings}
+            onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+            rabbitDualZone={rabbitDualZone}
+            onUpdateRabbitDualZone={(updates) => setRabbitDualZone((prev) => ({ ...prev, ...updates }))}
+          />
+        </div>
 
         {/* Tab: Générateurs Vidéo & Séquences Centralisés (Lapin Blanc, Papillon, etc.) */}
-        {appMode === 'sequence_generators' && (
-          <div className="space-y-4">
+        <div className={appMode === 'sequence_generators' ? 'space-y-4' : 'hidden'}>
+  <div className="max-w-xl mx-auto">
+              <ZoneCOscilloscope
+                points={xyPoints}
+                settings={scopeSettings}
+                onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+                presetName={currentPreset}
+                isPaused={isScopePaused}
+                onTogglePause={() => setIsScopePaused(!isScopePaused)}
+              />
+            </div>
             <SequenceGeneratorsPanel
-              onApplyPointsToScope={(points, color, name) => {
-                setXyPoints(points);
+              scopeSettings={scopeSettings}
+              onScopeSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+              onApplyPointsToScope={(points, color, name, fillChannels) => {
+                const pts = points || [];
+                setXyPoints(pts);
                 setSourceLabel(`SÉQUENCE: ${name.toUpperCase()}`);
+                setScopeSettings((prev) => ({
+                  ...prev,
+                  primaryColor: color || '#ffffff',
+                  colorScheme: 'custom',
+                  fillChannels: fillChannels || [],
+                }));
                 if (engineRef.current) {
-                  engineRef.current.setCustomVectorPath(points, 60);
+                  const patColor = color || '#ffffff';
+                  const ptColors = new Array(pts.length).fill(patColor);
+                  engineRef.current.setCustomVectorPath(pts, 60, ptColors);
+                  engineRef.current.setSynthesisMode('vector_path');
                 }
               }}
               onApplyTimelineScenes={(scenes) => {
@@ -1410,12 +1738,20 @@ export default function App() {
               }}
               onOpenAiChat={() => setIsAiChatOpen(true)}
             />
-          </div>
-        )}
+</div>
 
         {/* Tab: Station Radio & Lecteur Audio Continu */}
-        {appMode === 'radio' && (
-          <div className="space-y-4">
+        <div className={appMode === 'radio' ? 'space-y-4' : 'hidden'}>
+  <div className="max-w-xl mx-auto">
+              <ZoneCOscilloscope
+                points={xyPoints}
+                settings={scopeSettings}
+                onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+                presetName={currentPreset}
+                isPaused={isScopePaused}
+                onTogglePause={() => setIsScopePaused(!isScopePaused)}
+              />
+            </div>
             <RadioPlayerPanel
               trackName={radioTrackName}
               duration={radioDuration}
@@ -1430,12 +1766,20 @@ export default function App() {
               isInScope={scopeToggles.radioAudio}
               onToggleScopeFeed={(active) => handleToggleScopeSource('radioAudio')}
             />
-          </div>
-        )}
+</div>
 
         {/* Tab: Double Microphones (Micro 1 & Micro 2) */}
-        {appMode === 'mics' && (
-          <div className="space-y-4">
+        <div className={appMode === 'mics' ? 'space-y-4' : 'hidden'}>
+  <div className="max-w-xl mx-auto">
+              <ZoneCOscilloscope
+                points={xyPoints}
+                settings={scopeSettings}
+                onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+                presetName={currentPreset}
+                isPaused={isScopePaused}
+                onTogglePause={() => setIsScopePaused(!isScopePaused)}
+              />
+            </div>
             <DualMicPanel
               mic1Config={mic1Config}
               mic2Config={mic2Config}
@@ -1450,153 +1794,284 @@ export default function App() {
               level1={engineRef.current?.levelMic1 || 0}
               level2={engineRef.current?.levelMic2 || 0}
             />
-          </div>
-        )}
+</div>
 
         {/* Tab: Bibliothèque de Motifs */}
-        {appMode === 'patterns' && (
-          <div className="space-y-4">
+        <div className={appMode === 'patterns' ? 'space-y-4' : 'hidden'}>
+  <div className="max-w-xl mx-auto">
+              <ZoneCOscilloscope
+                points={xyPoints}
+                settings={scopeSettings}
+                onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+                presetName={currentPreset}
+                isPaused={isScopePaused}
+                onTogglePause={() => setIsScopePaused(!isScopePaused)}
+              />
+            </div>
             <PatternLibraryPanel
               currentScopePoints={xyPoints}
               onLoadPatternToScope={handleLoadPatternToScope}
               activePatternId={activePatternId}
+              scopeSettings={scopeSettings}
+              onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
             />
-          </div>
-        )}
+</div>
 
         {/* Tab: Modulation Matrix (FM / AM Routing for 8 Generators) */}
-        {appMode === 'matrix' && (
-          <div className="space-y-4">
+        <div className={appMode === 'matrix' ? 'space-y-4' : 'hidden'}>
+  <div className="max-w-xl mx-auto">
+              <ZoneCOscilloscope
+                points={xyPoints}
+                settings={scopeSettings}
+                onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+                presetName={currentPreset}
+                isPaused={isScopePaused}
+                onTogglePause={() => setIsScopePaused(!isScopePaused)}
+              />
+            </div>
             <OctaModulationMatrix
               state={octaState}
               onUpdateRoutings={handleUpdateModRoutings}
               onResetMatrix={handleResetModMatrix}
             />
-          </div>
-        )}
+</div>
 
         {/* Tab: Sessions & Presets Manager + Reset Departure */}
-        {appMode === 'sessions' && (
-          <div className="space-y-4">
+        <div className={appMode === 'sessions' ? 'space-y-4' : 'hidden'}>
+  <div className="max-w-xl mx-auto">
+              <ZoneCOscilloscope
+                points={xyPoints}
+                settings={scopeSettings}
+                onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+                presetName={currentPreset}
+                isPaused={isScopePaused}
+                onTogglePause={() => setIsScopePaused(!isScopePaused)}
+              />
+            </div>
             <SessionManager
               currentSessionData={getSessionData()}
               onRestoreSession={handleRestoreSession}
               onResetAllToZero={handleResetAllToZero}
             />
-          </div>
-        )}
+</div>
 
         {/* Tab 2: Segmented 4-Gen & 8-Gen Laboratory */}
-        {appMode === 'segmented' && (
-          <div className="space-y-4">
+        <div className={appMode === 'segmented' ? 'space-y-4' : 'hidden'}>
+  <div className="max-w-xl mx-auto">
+              <ZoneCOscilloscope
+                points={xyPoints}
+                settings={scopeSettings}
+                onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+                presetName={currentPreset}
+                isPaused={isScopePaused}
+                onTogglePause={() => setIsScopePaused(!isScopePaused)}
+              />
+            </div>
             <SegmentedGenerators
               segmentedX={segmentedX}
               segmentedY={segmentedY}
-              onUpdateX={setSegmentedX}
-              onUpdateY={setSegmentedY}
-              onApplyToOscilloscope={(points) => {
-                setXyPoints(points);
-                if (engineRef.current) {
-                  engineRef.current.setCustomVectorPath(points, 60);
-                }
-              }}
-              onToggleAudioPlay={handleToggleSegmentedAudio}
-              isAudioPlaying={isSegmentedActiveInAudio}
+              onSegmentedXChange={setSegmentedX}
+              onSegmentedYChange={setSegmentedY}
+              isActiveInAudio={isSegmentedActiveInAudio}
+              onToggleActiveInAudio={handleToggleSegmentedAudio}
             />
-          </div>
-        )}
+</div>
 
         {/* Tab 3: Vector Video & Image Import Lab */}
-        {appMode === 'image_lab' && (
-          <div className="space-y-4">
+        <div className={appMode === 'image_lab' ? 'space-y-4' : 'hidden'}>
+  <div className="max-w-xl mx-auto">
+              <ZoneCOscilloscope
+                points={xyPoints}
+                settings={scopeSettings}
+                onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+                presetName={currentPreset}
+                isPaused={isScopePaused}
+                onTogglePause={() => setIsScopePaused(!isScopePaused)}
+              />
+            </div>
             <VideoVectorLab
               audioEngine={engineRef.current}
               onSendToOscilloscope={handleSendImageToScope}
               isActiveInScope={isImageActiveInAudio}
               onSavePattern={handleLoadPatternToScope}
             />
-          </div>
-        )}
+</div>
 
         {/* Tab 4: Animated Vector Text Lab */}
-        {appMode === 'text_lab' && (
-          <div className="space-y-4">
+        <div className={appMode === 'text_lab' ? 'space-y-4' : 'hidden'}>
+  <div className="max-w-xl mx-auto">
+              <ZoneCOscilloscope
+                points={xyPoints}
+                settings={scopeSettings}
+                onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+                presetName={currentPreset}
+                isPaused={isScopePaused}
+                onTogglePause={() => setIsScopePaused(!isScopePaused)}
+              />
+            </div>
             <VectorTextLab
               onSendToOscilloscope={handleSendTextToScope}
               isActiveInScope={isTextActiveInAudio}
             />
-          </div>
-        )}
+</div>
 
         {/* Tab 5: Multi-Scene Timeline with Automation */}
-        {appMode === 'timeline' && (
-          <div className="space-y-4">
+        <div className={appMode === 'timeline' ? 'space-y-4' : 'hidden'}>
+  <div className="max-w-xl mx-auto">
+              <ZoneCOscilloscope
+                points={xyPoints}
+                settings={scopeSettings}
+                onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+                presetName={currentPreset}
+                isPaused={isScopePaused}
+                onTogglePause={() => setIsScopePaused(!isScopePaused)}
+              />
+            </div>
             <TimelineSceneLab
               scenes={timelineScenes}
               onScenesChange={setTimelineScenes}
               onSendFrameToScope={handleSendTimelineToScope}
               isActiveInScope={isTimelineActiveInAudio}
+              scopeSettings={scopeSettings}
+              onScopeSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
             />
-          </div>
-        )}
+</div>
 
         {/* Tab 6: Mandala Composer */}
-        {appMode === 'mandala' && (
-          <MandalaComposer
-            layers={mandalaLayers}
-            onLayersChange={setMandalaLayers}
-            combineMode={mandalaCombineMode}
-            onCombineModeChange={setMandalaCombineMode}
-            onApplyToAudioEngine={() => {
-              const active = mandalaLayers.find((l) => l.enabled) || mandalaLayers[0];
-              if (active) {
-                setConfigX((prev) => ({ ...prev, frequency: active.frequency, phase: 0 }));
-                setConfigY((prev) => ({ ...prev, frequency: active.frequency * active.ratio, phase: active.phase }));
-                setAppMode('main');
-              }
-            }}
-          />
-        )}
+        <div className={appMode === 'mandala' ? 'space-y-4' : 'hidden'}>
+  <div className="max-w-xl mx-auto">
+              <ZoneCOscilloscope
+                points={xyPoints}
+                settings={scopeSettings}
+                onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+                presetName={currentPreset}
+                isPaused={isScopePaused}
+                onTogglePause={() => setIsScopePaused(!isScopePaused)}
+              />
+            </div>
+            <MandalaComposer
+              layers={mandalaLayers}
+              onLayersChange={(newLayers) => {
+                setMandalaLayers(newLayers);
+                const pts = generateMandalaPoints(newLayers, mandalaCombineMode, 600);
+                setXyPoints(pts);
+                if (engineRef.current) {
+                  engineRef.current.setCustomVectorPath(pts, 60);
+                }
+              }}
+              combineMode={mandalaCombineMode}
+              onCombineModeChange={(newMode) => {
+                setMandalaCombineMode(newMode);
+                const pts = generateMandalaPoints(mandalaLayers, newMode, 600);
+                setXyPoints(pts);
+                if (engineRef.current) {
+                  engineRef.current.setCustomVectorPath(pts, 60);
+                }
+              }}
+              onApplyToAudioEngine={() => {
+                const pts = generateMandalaPoints(mandalaLayers, mandalaCombineMode, 600);
+                setXyPoints(pts);
+
+                const active = mandalaLayers.find((l) => l.enabled) || mandalaLayers[0];
+                if (active) {
+                  setConfigX((prev) => ({ ...prev, frequency: active.frequency, phase: 0 }));
+                  setConfigY((prev) => ({ ...prev, frequency: active.frequency * active.ratio, phase: active.phase }));
+                }
+
+                if (engineRef.current) {
+                  engineRef.current.setCustomVectorPath(pts, 60);
+                  if (active) {
+                    engineRef.current.updateConfig('x', { frequency: active.frequency, phase: 0 });
+                    engineRef.current.updateConfig('y', { frequency: active.frequency * active.ratio, phase: active.phase });
+                  }
+                }
+
+                setIsImageActiveInAudio(false);
+                setIsTextActiveInAudio(false);
+                setIsSegmentedActiveInAudio(false);
+                setSourceLabel('MANDALA MULTI-COUCHES');
+              }}
+            />
+</div>
 
         {/* Tab 7: Vortex Designer */}
-        {appMode === 'vortex' && (
-          <VortexDesigner onApplyVortexToScope={handleApplyVortex} />
-        )}
+        <div className={appMode === 'vortex' ? 'space-y-4' : 'hidden'}>
+  <div className="max-w-xl mx-auto">
+              <ZoneCOscilloscope
+                points={xyPoints}
+                settings={scopeSettings}
+                onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+                presetName={currentPreset}
+                isPaused={isScopePaused}
+                onTogglePause={() => setIsScopePaused(!isScopePaused)}
+              />
+            </div>
+            <VortexDesigner onApplyVortexToScope={handleApplyVortex} />
+</div>
 
         {/* Tab 8: Spectral Lab */}
-        {appMode === 'spectral' && (
-          <SpectralLab
-            freqDataX={freqDataX}
-            freqDataY={freqDataY}
-            rawTimeDataX={rawTimeDataX}
-            rawTimeDataY={rawTimeDataY}
-            sampleRate={engineRef.current?.getSampleRate() || 48000}
-          />
-        )}
+        <div className={appMode === 'spectral' ? 'space-y-4' : 'hidden'}>
+  <div className="max-w-xl mx-auto">
+              <ZoneCOscilloscope
+                points={xyPoints}
+                settings={scopeSettings}
+                onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+                presetName={currentPreset}
+                isPaused={isScopePaused}
+                onTogglePause={() => setIsScopePaused(!isScopePaused)}
+              />
+            </div>
+            <SpectralLab
+              freqDataX={freqDataX}
+              freqDataY={freqDataY}
+              rawTimeDataX={rawTimeDataX}
+              rawTimeDataY={rawTimeDataY}
+              sampleRate={engineRef.current?.getSampleRate() || 48000}
+            />
+</div>
 
         {/* Tab 9: Comparator View (Calculated vs Measured) */}
-        {appMode === 'comparator' && (
-          <ComparatorView
-            calculatedPoints={generateLissajousPoints(configX.frequency, configY.frequency, configX.phase, configY.phase, 512)}
-            measuredPoints={xyPoints}
-          />
-        )}
+        <div className={appMode === 'comparator' ? 'space-y-4' : 'hidden'}>
+  <div className="max-w-xl mx-auto">
+              <ZoneCOscilloscope
+                points={xyPoints}
+                settings={scopeSettings}
+                onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+                presetName={currentPreset}
+                isPaused={isScopePaused}
+                onTogglePause={() => setIsScopePaused(!isScopePaused)}
+              />
+            </div>
+            <ComparatorView
+              calculatedPoints={lissajousPoints}
+              measuredPoints={xyPoints}
+            />
+</div>
 
         {/* Tab 10: Real Oscilloscope Calibration Mode */}
-        {appMode === 'real_scope' && (
-          <RealOscilloscopeMode
-            configX={configX}
-            configY={configY}
-            onConfigChangeX={(updates) => setConfigX((prev) => ({ ...prev, ...updates }))}
-            onConfigChangeY={(updates) => setConfigY((prev) => ({ ...prev, ...updates }))}
-            onTriggerTestPattern={handleTriggerTestPattern}
-          />
-        )}
+        <div className={appMode === 'real_scope' ? 'space-y-4' : 'hidden'}>
+  <div className="max-w-xl mx-auto">
+              <ZoneCOscilloscope
+                points={xyPoints}
+                settings={scopeSettings}
+                onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+                presetName={currentPreset}
+                isPaused={isScopePaused}
+                onTogglePause={() => setIsScopePaused(!isScopePaused)}
+              />
+            </div>
+            <RealOscilloscopeMode
+              configX={configX}
+              configY={configY}
+              onConfigChangeX={(updates) => setConfigX((prev) => ({ ...prev, ...updates }))}
+              onConfigChangeY={(updates) => setConfigY((prev) => ({ ...prev, ...updates }))}
+              onTriggerTestPattern={handleTriggerTestPattern}
+            />
+</div>
 
         {/* Tab 11: Genesis Mode */}
-        {appMode === 'genesis' && (
-          <div className="space-y-4">
-            <div className="max-w-xl mx-auto">
+        <div className={appMode === 'genesis' ? 'space-y-4' : 'hidden'}>
+  <div className="max-w-xl mx-auto">
               <ZoneCOscilloscope
                 points={xyPoints}
                 settings={scopeSettings}
@@ -1617,13 +2092,29 @@ export default function App() {
               onToggleRecord={handleToggleRecord}
               onExport={() => setIsExportModalOpen(true)}
               onGenerateHarmonicMandala={handleGenerateHarmonicMandala}
+              relativisticEnabled={relativisticEnabled}
+              speedOfLightLimit={speedOfLightLimit}
+              gravitationalDilationDepth={gravitationalDilationDepth}
+              onRelativisticChange={(updates) => {
+                if (updates.enabled !== undefined) setRelativisticEnabled(updates.enabled);
+                if (updates.speedOfLightLimit !== undefined) setSpeedOfLightLimit(updates.speedOfLightLimit);
+                if (updates.gravitationalDilationDepth !== undefined) setGravitationalDilationDepth(updates.gravitationalDilationDepth);
+              }}
             />
-          </div>
-        )}
+</div>
 
         {/* Tab 12: Piano & Notes Harmoniques */}
-        {appMode === 'piano' && engineRef.current && (
-          <div className="space-y-4">
+        {engineRef.current && (<div className={appMode === 'piano' ? 'space-y-4' : 'hidden'}>
+  <div className="max-w-xl mx-auto">
+              <ZoneCOscilloscope
+                points={xyPoints}
+                settings={scopeSettings}
+                onSettingsChange={(updates) => setScopeSettings((prev) => ({ ...prev, ...updates }))}
+                presetName={currentPreset}
+                isPaused={isScopePaused}
+                onTogglePause={() => setIsScopePaused(!isScopePaused)}
+              />
+            </div>
             <HarmonicPianoPanel
               engine={engineRef.current}
               configX={configX}
@@ -1641,8 +2132,7 @@ export default function App() {
                 setSourceLabel(`PIANO : ${name}`);
               }}
             />
-          </div>
-        )}
+</div>)}
 
         {/* Session & Audio/Video Master Recorder Box (Accessible across all tabs) */}
         {engineRef.current && (

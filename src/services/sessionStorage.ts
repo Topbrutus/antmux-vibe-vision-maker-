@@ -2,6 +2,7 @@ import { GenesisSessionData, OctaSystemState } from '../types/vectorScope';
 import { createDefaultOctaSystem } from './mathEngine';
 
 const STORAGE_KEY = 'genesis_vector_lab_saved_sessions_v2';
+const AUTOSAVE_KEY = 'genesis_vector_lab_active_state_autosave';
 
 export interface SavedSessionItem {
   id: string;
@@ -10,6 +11,42 @@ export interface SavedSessionItem {
   createdAt: string;
   updatedAt: string;
   data: GenesisSessionData;
+}
+
+/**
+ * Saves current active session automatically into localStorage
+ */
+export function autoSaveCurrentSession(data: GenesisSessionData): void {
+  try {
+    localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(data));
+  } catch (err) {
+    console.warn('Failed to autosave session to localStorage:', err);
+  }
+}
+
+/**
+ * Retrieves the last auto-saved session if available
+ */
+export function getAutoSavedSession(): GenesisSessionData | null {
+  try {
+    const raw = localStorage.getItem(AUTOSAVE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (err) {
+    console.warn('Failed to load autosaved session:', err);
+    return null;
+  }
+}
+
+/**
+ * Clears the autosaved state
+ */
+export function clearAutoSavedSession(): void {
+  try {
+    localStorage.removeItem(AUTOSAVE_KEY);
+  } catch (err) {
+    console.warn('Failed to clear autosaved session:', err);
+  }
 }
 
 /**

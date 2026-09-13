@@ -55,6 +55,9 @@ interface VideoVectorLabProps {
   onSavePattern?: (pattern: PatternItem) => void;
 }
 
+let cachedDemoBlob: Blob | null = null;
+let cachedDemoAudioBuffer: AudioBuffer | null = null;
+
 export const VideoVectorLab: React.FC<VideoVectorLabProps> = ({
   audioEngine,
   onSendToOscilloscope,
@@ -92,6 +95,7 @@ export const VideoVectorLab: React.FC<VideoVectorLabProps> = ({
 
   // Video Vector Trajectory state
   const [currentFramePoints, setCurrentFramePoints] = useState<Array<[number, number]>>([]);
+  const currentFramePointsRef = useRef<Array<[number, number]>>([]);
   const [opticalFps, setOpticalFps] = useState(60);
   const [isGeneratingDemo, setIsGeneratingDemo] = useState(false);
 
@@ -143,7 +147,11 @@ export const VideoVectorLab: React.FC<VideoVectorLabProps> = ({
     const loadDemo = async () => {
       setIsGeneratingDemo(true);
       try {
-        const demoBlob = await generateJerobeamMushroomVideoBlob(6);
+        let demoBlob = cachedDemoBlob;
+        if (!demoBlob) {
+          demoBlob = await generateJerobeamMushroomVideoBlob(6);
+          cachedDemoBlob = demoBlob;
+        }
         if (!isCancelled) {
           const url = URL.createObjectURL(demoBlob);
           setVideoSrc(url);
@@ -288,6 +296,7 @@ export const VideoVectorLab: React.FC<VideoVectorLabProps> = ({
         const points = result.opticalPoints;
 
         if (points.length > 2) {
+          currentFramePointsRef.current = points;
           setCurrentFramePoints(points);
 
           // Stream optical trajectory + video audio into AudioEngine if active in scope
@@ -380,9 +389,9 @@ export const VideoVectorLab: React.FC<VideoVectorLabProps> = ({
         }
 
         setCurrentTime(video.currentTime);
-      } else if (video && (video.paused || video.ended) && scopeCanvas && currentFramePoints.length > 2) {
+      } else if (video && (video.paused || video.ended) && scopeCanvas && currentFramePointsRef.current.length > 2) {
         // Redraw static frame when paused
-        renderScopeScreen(scopeCanvas, currentFramePoints, video.currentTime);
+        renderScopeScreen(scopeCanvas, currentFramePointsRef.current, video.currentTime);
       }
 
       animFrameIdRef.current = requestAnimationFrame(processLoop);
@@ -394,7 +403,7 @@ export const VideoVectorLab: React.FC<VideoVectorLabProps> = ({
       active = false;
       if (animFrameIdRef.current) cancelAnimationFrame(animFrameIdRef.current);
     };
-  }, [beamConfig, visualStereoMix, audioModulation, scanFreqHz, phosphorColor, videoAudioBuffer, isRecordingWav, audioEngine, isActiveInScope, currentFramePoints]);
+  }, [beamConfig, visualStereoMix, audioModulation, scanFreqHz, phosphorColor, videoAudioBuffer, isRecordingWav, audioEngine, isActiveInScope]);
 
   // Render Oscilloscope Screen (Right Panel)
   const renderScopeScreen = (canvas: HTMLCanvasElement, points: Array<[number, number]>, t: number) => {

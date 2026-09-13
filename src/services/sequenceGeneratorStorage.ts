@@ -349,7 +349,7 @@ export function computeTemporalOffsetAtTime(
     return { autoDeltaX: 0, autoDeltaY: 0, activeWeightsCount: 0 };
   }
 
-  const duration = Math.max(0.2, generator.durationSec / Math.max(0.1, generator.speedMultiplier));
+  const duration = Math.max(0.2, (generator.durationSec || 1) / Math.max(0.1, generator.speedMultiplier || 1));
   const tMod = timeSec % duration;
 
   for (const corr of corrections) {
@@ -414,7 +414,7 @@ export function sampleGeneratorAtTime(
     return { points: [], currentColor: generator.primaryColor, autoDeltaX, autoDeltaY };
   }
   if (kfs.length === 1) {
-    const rawPts = kfs[0].points;
+    const rawPts = kfs[0].points || [];
     const transformed = applyGeneratorTransformations(
       rawPts,
       generator.scale,
@@ -431,22 +431,27 @@ export function sampleGeneratorAtTime(
     };
   }
 
-  const effectiveDuration = Math.max(0.2, generator.durationSec / Math.max(0.1, generator.speedMultiplier));
+  const effectiveDuration = Math.max(0.2, (generator.durationSec || 1) / Math.max(0.1, generator.speedMultiplier || 1));
   const tNorm = (timeSec % effectiveDuration) / effectiveDuration; // 0..1
   const segmentFloat = tNorm * kfs.length;
-  const idxA = Math.floor(segmentFloat) % kfs.length;
-  const idxB = (idxA + 1) % kfs.length;
-  const blend = segmentFloat - Math.floor(segmentFloat);
-
-  const ptsA = kfs[idxA].points;
-  const ptsB = kfs[idxB].points;
+  let idxA = (Math.floor(segmentFloat) % kfs.length + kfs.length) % kfs.length;
+  if (isNaN(idxA)) idxA = 0;
+  let idxB = (idxA + 1) % kfs.length;
+  if (isNaN(idxB)) idxB = 0;
+  let blend = segmentFloat - Math.floor(segmentFloat);
+  if (isNaN(blend)) blend = 0;
+  
+  const kfA = kfs[idxA] || kfs[0];
+  const kfB = kfs[idxB] || kfs[0];
+  const ptsA = kfA?.points || [];
+  const ptsB = kfB?.points || [];
 
   const maxLen = Math.max(ptsA.length, ptsB.length);
   const interpolated: Array<[number, number]> = [];
 
   for (let i = 0; i < maxLen; i++) {
-    const pA = ptsA[i % ptsA.length];
-    const pB = ptsB[i % ptsB.length];
+    const pA = ptsA.length > 0 ? ptsA[i % ptsA.length] : [0, 0];
+    const pB = ptsB.length > 0 ? ptsB[i % ptsB.length] : [0, 0];
     const ix = pA[0] * (1 - blend) + pB[0] * blend;
     const iy = pA[1] * (1 - blend) + pB[1] * blend;
     interpolated.push([ix, iy]);

@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Music,
   Play,
   Square,
   Volume2,
+  VolumeX,
   Sliders,
   Sparkles,
   Zap,
@@ -11,7 +12,13 @@ import {
   Layers,
   Activity,
   Compass,
-  Repeat
+  Repeat,
+  Hand,
+  Power,
+  Info,
+  ChevronDown,
+  ChevronUp,
+  Radio
 } from 'lucide-react';
 import { ChannelConfig, PianoKeyData } from '../types/vectorScope';
 import { VectorAudioEngine } from '../services/audioEngine';
@@ -92,14 +99,31 @@ export const HarmonicPianoPanel: React.FC<HarmonicPianoPanelProps> = ({
   const [selectedRatioIndex, setSelectedRatioIndex] = useState<number>(2); // 3:2 default
   const [activeNoteName, setActiveNoteName] = useState<string | null>(null);
   const [activeFreq, setActiveFreq] = useState<number>(432);
+  // Default to 'momentary' (Push & Release comme un vrai piano)
+  const [playMode, setPlayMode] = useState<'momentary' | 'latch'>('momentary');
   const [isPlayingArp, setIsPlayingArp] = useState<boolean>(false);
   const [arpBpm, setArpBpm] = useState<number>(120);
   const [arpMode, setArpMode] = useState<'up' | 'down' | 'solfeggio' | 'fibonacci'>('up');
   const [waveform, setWaveform] = useState<ChannelConfig['waveform']>('sine');
-  const [stereoSpread, setStereoSpread] = useState<boolean>(true);
+  const [masterVol, setMasterVol] = useState<number>(0.8);
+  const [audioRunning, setAudioRunning] = useState<boolean>(false);
+  const [showHowItWorks, setShowHowItWorks] = useState<boolean>(false);
 
   const arpTimerRef = useRef<number | null>(null);
   const arpStepRef = useRef<number>(0);
+  const activeKeysCountRef = useRef<number>(0);
+  const isPointerActiveRef = useRef<boolean>(false);
+
+  // Synchronize audio context state with UI
+  useEffect(() => {
+    const checkState = () => {
+      const state = engine.getAudioContextState();
+      setAudioRunning(state === 'running');
+    };
+    checkState();
+    const timer = setInterval(checkState, 400);
+    return () => clearInterval(timer);
+  }, [engine]);
 
   // Note definitions (chromatic scale)
   const semitonesFromA4: Record<string, number> = {
@@ -184,11 +208,31 @@ export const HarmonicPianoPanel: React.FC<HarmonicPianoPanelProps> = ({
     return keys;
   };
 
-  const keys = generateKeys();
+  const keys = useMemo(() => generateKeys(), [currentOctave, tuningBase]);
+
+  // Silence / Stop note completely ("Rien du tout")
+  const stopNote = useCallback(() => {
+    setActiveNoteName(null);
+    if (isPlayingArp) setIsPlayingArp(false);
+    engine.releasePianoNote();
+  }, [engine, isPlayingArp]);
+
+  // Master Power Toggle (ON / OFF)
+  const togglePower = async () => {
+    const isNowRunning = await engine.toggleAudioState();
+    setAudioRunning(isNowRunning);
+    if (!isNowRunning) {
+      stopNote();
+    } else {
+      // Direct audible confirmation
+      const f = computeFreq('A', currentOctave);
+      playNote(f, `LA${currentOctave}`);
+    }
+  };
 
   // Play a note & apply frequencies to Vector Oscilloscope generators
   const playNote = useCallback(
-    (freq: number, noteLabel: string) => {
+    async (freq: number, noteLabel: string) => {
       setActiveNoteName(noteLabel);
       setActiveFreq(freq);
 
@@ -196,17 +240,13 @@ export const HarmonicPianoPanel: React.FC<HarmonicPianoPanelProps> = ({
       const freqX = Math.round(freq * 10) / 10;
       const freqY = Math.round(freq * ratio * 10) / 10;
 
-      // Update both Audio Engine and React States
-      engine.initAudio();
-      engine.updateConfigX({ frequency: freqX, waveform, mute: false });
-      engine.updateConfigY({ frequency: freqY, waveform, mute: false });
-
-      onUpdateConfigX({ frequency: freqX, waveform, mute: false });
-      onUpdateConfigY({ frequency: freqY, waveform, mute: false });
-
+      // Always guarantee Audio Engine is active and running
+      await engine.resumeContext();
+      setAudioRunning(true);
+      engine.triggerPianoNote(freqX, freqY, waveform);
       onSelectPresetName(`Note ${noteLabel} (${freqX}Hz / ${freqY}Hz)`);
     },
-    [engine, selectedRatioIndex, waveform, onUpdateConfigX, onUpdateConfigY, onSelectPresetName]
+    [engine, selectedRatioIndex, waveform, onSelectPresetName]
   );
 
   // Play Solfeggio direct preset
@@ -214,21 +254,80 @@ export const HarmonicPianoPanel: React.FC<HarmonicPianoPanelProps> = ({
     playNote(preset.freq, `${preset.note} (${preset.freq}Hz)`);
   };
 
-  // Keyboard Event Handlers
+  // Global pointer release listener: prevents stuck notes in momentary mode
+  useEffect(() => {
+    const handleGlobalRelease = () => {
+      if (isPointerActiveRef.current) {
+        isPointerActiveRef.current = false;
+        if (playMode === 'momentary') {
+          stopNote();
+        }
+      }
+    };
+
+    const handleWindowBlur = () => {
+      activeKeysCountRef.current = 0;
+      isPointerActiveRef.current = false;
+      if (playMode === 'momentary') {
+        stopNote();
+      }
+    };
+
+    window.addEventListener('pointerup', handleGlobalRelease);
+    window.addEventListener('pointercancel', handleGlobalRelease);
+    window.addEventListener('mouseup', handleGlobalRelease);
+    window.addEventListener('touchend', handleGlobalRelease);
+    window.addEventListener('touchcancel', handleGlobalRelease);
+    window.addEventListener('blur', handleWindowBlur);
+
+    return () => {
+      window.removeEventListener('pointerup', handleGlobalRelease);
+      window.removeEventListener('pointercancel', handleGlobalRelease);
+      window.removeEventListener('mouseup', handleGlobalRelease);
+      window.removeEventListener('touchend', handleGlobalRelease);
+      window.removeEventListener('touchcancel', handleGlobalRelease);
+      window.removeEventListener('blur', handleWindowBlur);
+    };
+  }, [playMode, stopNote]);
+
+  // Keyboard Event Handlers (Support momentary & latch)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.repeat) return;
       const key = e.key.toLowerCase();
+      if (key === 'escape' || key === ' ') {
+        e.preventDefault();
+        stopNote();
+        return;
+      }
       const mapped = keyboardKeyMap[key];
       if (mapped) {
+        activeKeysCountRef.current++;
         const freq = computeFreq(mapped.pitch, currentOctave + mapped.octaveOffset);
         playNote(freq, `${mapped.pitch}${currentOctave + mapped.octaveOffset}`);
       }
     };
 
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      const key = e.key.toLowerCase();
+      const mapped = keyboardKeyMap[key];
+      if (mapped) {
+        activeKeysCountRef.current = Math.max(0, activeKeysCountRef.current - 1);
+        if (playMode === 'momentary' && activeKeysCountRef.current === 0) {
+          stopNote();
+        }
+      }
+    };
+
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentOctave, tuningBase, playNote]);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [currentOctave, tuningBase, playNote, playMode, stopNote]);
 
   // Arpeggiator Loop
   useEffect(() => {
@@ -273,43 +372,253 @@ export const HarmonicPianoPanel: React.FC<HarmonicPianoPanelProps> = ({
     };
   }, [isPlayingArp, arpBpm, arpMode, keys, playNote]);
 
+  const isMutedOrSilent = configX.mute && configY.mute;
+
   return (
-    <div className="bg-[#0a1324] border border-[#14233c] rounded-2xl p-5 font-mono text-xs text-slate-300 shadow-2xl space-y-6 select-none">
-      {/* Top Header Banner */}
-      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#14233c] pb-4">
+    <div className="bg-[#0a1324] border border-[#14233c] rounded-2xl p-5 font-mono text-xs text-slate-300 shadow-2xl space-y-5 select-none">
+      {/* Top Master Power & Control Header */}
+      <div className="bg-gradient-to-r from-[#0d1b33] via-[#0f2244] to-[#0d1b33] border-2 border-[#1d355c] rounded-2xl p-4 shadow-xl flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-400 via-rose-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-amber-500/20 text-slate-950">
-            <Music className="w-5 h-5 stroke-[2.5]" />
+          <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-amber-400 via-rose-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-amber-500/20 text-slate-950 font-black">
+            <Music className="w-6 h-6 stroke-[2.5]" />
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-sm font-black text-amber-300 tracking-wider uppercase">
-                CLAVIER PIANO & HARMONIQUES VECTORIELLES
+              <h2 className="text-base font-black text-amber-300 tracking-wider uppercase">
+                PIANO HARMONIQUE & GÉNÉRATEUR VECTORIEL
               </h2>
-              <span className="px-2 py-0.5 text-[10px] bg-amber-950/80 text-amber-400 border border-amber-500/40 rounded-full font-bold">
-                NOTES & SIGNES ÉTABLIS
+              <span className="px-2 py-0.5 text-[10px] bg-amber-950/80 text-amber-300 border border-amber-500/40 rounded-full font-bold">
+                DIRECT AUDIO & LISSAJOUS
               </span>
             </div>
-            <p className="text-[11px] text-slate-400">
-              Jouez les notes chromatiques et fréquences sacrées pour animer instantanément l'oscilloscope en figures de Lissajous.
+            <p className="text-[11px] text-slate-300">
+              Touchez les touches pour générer instantanément le son stéréo et dessiner les figures géométriques sur l'oscilloscope.
             </p>
           </div>
         </div>
 
-        {/* Current Active Note Telemetry Badge */}
-        <div className="flex items-center gap-3 bg-[#070e1c] border border-amber-500/30 px-3.5 py-1.5 rounded-xl shadow-inner">
-          <div className="w-3 h-3 rounded-full bg-amber-400 animate-ping" />
-          <div>
-            <div className="text-[10px] text-slate-500 font-bold uppercase">NOTE ACTIVE DANS LE SCOPE</div>
-            <div className="text-sm font-black text-amber-300">
-              {activeNoteName || 'LA 432 Hz'} <span className="text-slate-400 text-xs">({activeFreq.toFixed(1)} Hz)</span>
-            </div>
+        {/* Master Audio Power Controls & Volume */}
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Main ON / OFF Power Switch */}
+          <button
+            onClick={togglePower}
+            title="Activer ou mettre en veille le son (autorise la carte son de votre navigateur)"
+            className={`flex items-center gap-2.5 px-4 py-2.5 rounded-xl font-black text-xs transition-all border shadow-lg ${
+              audioRunning
+                ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 border-emerald-300 shadow-emerald-500/30'
+                : 'bg-rose-600 hover:bg-rose-500 text-white border-rose-400 shadow-rose-600/40 animate-pulse'
+            }`}
+          >
+            <Power className="w-4 h-4" />
+            <span>{audioRunning ? 'AUDIO : ON (ACTIF)' : 'CLIQUEZ ICI : ACTIVER LE SON (ON)'}</span>
+          </button>
+
+          {/* Test Sound Button (La 432 Hz) */}
+          <button
+            onClick={() => playNote(432, 'LA4 (432Hz Test)')}
+            title="Émettre un son de test immédiat à 432 Hz"
+            className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl font-bold text-xs bg-[#10223e] hover:bg-[#18345e] text-cyan-300 border border-cyan-500/40 transition-all hover:scale-105"
+          >
+            <Radio className="w-4 h-4 text-cyan-400" />
+            <span>TESTER LE SON ♫</span>
+          </button>
+
+          {/* Quick Silence (Rien du tout) button */}
+          <button
+            onClick={stopNote}
+            title="Couper immédiatement le son / Retour au silence (Touche Échap ou Espace)"
+            className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl font-black text-xs transition-all border shadow-md ${
+              isMutedOrSilent || !activeNoteName
+                ? 'bg-slate-900/90 text-slate-400 border-slate-700 hover:text-slate-200'
+                : 'bg-amber-600 hover:bg-amber-500 text-slate-950 border-amber-400 shadow-amber-600/30'
+            }`}
+          >
+            <VolumeX className="w-4 h-4" />
+            <span>SILENCE (RIEN)</span>
+          </button>
+
+          {/* Master Volume Slider */}
+          <div className="flex items-center gap-2 bg-[#070e1c] px-3 py-1.5 rounded-xl border border-[#162744]">
+            <Volume2 className="w-4 h-4 text-amber-400" />
+            <span className="text-[10px] text-slate-400 font-bold">VOLUME :</span>
+            <input
+              type="range"
+              min="0"
+              max="1.5"
+              step="0.05"
+              value={masterVol}
+              onChange={(e) => {
+                const val = parseFloat(e.target.value);
+                setMasterVol(val);
+                engine.setMasterVolume(val);
+              }}
+              className="w-20 accent-amber-400"
+            />
+            <span className="text-xs font-black text-amber-300 w-10 text-right">
+              {Math.round(masterVol * 100)}%
+            </span>
           </div>
         </div>
       </div>
 
+      {/* Explanatory Guide Drawer */}
+      <div className="bg-[#070f1e] border border-[#162846] rounded-xl p-3 text-[11px] space-y-2">
+        <div
+          onClick={() => setShowHowItWorks(!showHowItWorks)}
+          className="flex items-center justify-between cursor-pointer text-slate-300 hover:text-amber-300"
+        >
+          <span className="flex items-center gap-2 font-bold text-amber-400">
+            <Info className="w-4 h-4" /> COMMENT FONCTIONNE LE PIANO VECTORIEL ? (GUIDE EXPRESS)
+          </span>
+          <button className="text-slate-400 hover:text-white">
+            {showHowItWorks ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </button>
+        </div>
+
+        {showHowItWorks && (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2 border-t border-[#14233c] text-slate-400 leading-relaxed">
+            <div className="bg-[#0b162a] p-2.5 rounded-lg border border-[#1c3050]">
+              <div className="text-amber-300 font-bold mb-1">1. Déverrouillage du son</div>
+              <p>
+                Par sécurité, les navigateurs web coupent le son au chargement. Cliquez sur le bouton vert <strong>AUDIO : ON</strong> ou sur n'importe quelle touche pour allumer le moteur sonore.
+              </p>
+            </div>
+            <div className="bg-[#0b162a] p-2.5 rounded-lg border border-[#1c3050]">
+              <div className="text-cyan-300 font-bold mb-1">2. Son Stéréo & Lissajous</div>
+              <p>
+                Chaque touche joue une note fondamentale sur la voie X (Gauche) et son harmonique sur la voie Y (Droite) selon le ratio choisi (ex. Quinte 3:2), ce qui fait danser l'oscilloscope !
+              </p>
+            </div>
+            <div className="bg-[#0b162a] p-2.5 rounded-lg border border-[#1c3050]">
+              <div className="text-emerald-300 font-bold mb-1">3. Clavier Physique & Tactile</div>
+              <p>
+                Jouez à la souris, au doigt sur écran tactile, ou directement avec votre clavier d'ordinateur (touches <strong>A, W, S, E, D, F, T, G, Y, H, U, J, K</strong>). Touche Échap = Silence.
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Status Banner */}
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-[#070e1c] px-4 py-2.5 rounded-xl border border-[#162744]">
+        <div className="flex items-center gap-3">
+          <div className={`w-3.5 h-3.5 rounded-full ${audioRunning && activeNoteName && !isMutedOrSilent ? 'bg-amber-400 animate-ping' : audioRunning ? 'bg-emerald-400' : 'bg-rose-500'}`} />
+          <div>
+            <div className="text-[10px] text-slate-500 font-bold uppercase">NOTE ACTIVE & FRÉQUENCES GÉNÉRÉES</div>
+            <div className="text-sm font-black text-amber-300">
+              {activeNoteName && !isMutedOrSilent ? (
+                <>
+                  {activeNoteName} <span className="text-slate-400 text-xs font-normal">({activeFreq.toFixed(1)} Hz) • X:{Math.round(activeFreq)}Hz / Y:{Math.round(activeFreq * HARMONIC_INTERVALS[selectedRatioIndex].ratio)}Hz</span>
+                </>
+              ) : (
+                <span className="text-slate-500 font-normal italic">En attente de touche • Silence</span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-slate-400 font-bold">INTERVALLE HARMONIQUE :</span>
+          <span className="px-2 py-1 bg-[#101b2f] border border-[#1c3050] rounded text-cyan-300 font-bold">
+            {HARMONIC_INTERVALS[selectedRatioIndex].label} ({HARMONIC_INTERVALS[selectedRatioIndex].desc})
+          </span>
+        </div>
+      </div>
+
+      {/* Prominent Mode Selector: Push & Release (Vrai Piano) vs Rester Enclenché */}
+      <div className="bg-[#070e1c] border-2 border-[#1c355e] rounded-2xl p-3.5 shadow-lg space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-xs font-black text-amber-300 flex items-center gap-2 uppercase tracking-wide">
+            <Hand className="w-4 h-4 text-amber-400" /> CHOIX DU MODE DE JEU (2 MODES AU CHOIX) :
+          </span>
+          <span className="text-[11px] text-slate-400">
+            {playMode === 'momentary'
+              ? 'Mode actif : Vrai Piano (Appuyer = Jouer • Relâcher = Silence)'
+              : 'Mode actif : Maintien Continu (La note reste allumée en continu après le clic)'}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          {/* Mode 1: Push & Release */}
+          <button
+            type="button"
+            onClick={() => {
+              setPlayMode('momentary');
+              stopNote();
+            }}
+            className={`flex items-start gap-3 p-3 rounded-xl border text-left transition-all ${
+              playMode === 'momentary'
+                ? 'bg-gradient-to-r from-amber-500/20 via-amber-400/10 to-transparent border-amber-400 shadow-md shadow-amber-500/20 text-white ring-1 ring-amber-400/40'
+                : 'bg-[#0d1728] hover:bg-[#122038] border-[#1a2d4c] text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <div
+              className={`w-8 h-8 rounded-lg flex items-center justify-center font-black shrink-0 ${
+                playMode === 'momentary'
+                  ? 'bg-amber-400 text-slate-950 shadow-md shadow-amber-500/30'
+                  : 'bg-slate-800 text-slate-400'
+              }`}
+            >
+              🎹
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-black text-amber-300 uppercase">
+                  1. PUSH & RELEASE (VRAI PIANO)
+                </span>
+                {playMode === 'momentary' && (
+                  <span className="px-1.5 py-0.2 bg-amber-400 text-slate-950 font-black text-[9px] rounded">
+                    ACTIF
+                  </span>
+                )}
+              </div>
+              <p className="text-[10px] text-slate-300 mt-0.5 leading-snug">
+                Le son et le tracé jouent <strong>uniquement pendant l'appui</strong> (clic maintenu, doigt posé ou touche clavier) et <strong>s'arrêtent net dès le relâchement</strong>.
+              </p>
+            </div>
+          </button>
+
+          {/* Mode 2: Rester enclenché (Latch) */}
+          <button
+            type="button"
+            onClick={() => setPlayMode('latch')}
+            className={`flex items-start gap-3 p-3 rounded-xl border text-left transition-all ${
+              playMode === 'latch'
+                ? 'bg-gradient-to-r from-cyan-500/20 via-cyan-400/10 to-transparent border-cyan-400 shadow-md shadow-cyan-500/20 text-white ring-1 ring-cyan-400/40'
+                : 'bg-[#0d1728] hover:bg-[#122038] border-[#1a2d4c] text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <div
+              className={`w-8 h-8 rounded-lg flex items-center justify-center font-black shrink-0 ${
+                playMode === 'latch'
+                  ? 'bg-cyan-400 text-slate-950 shadow-md shadow-cyan-500/30'
+                  : 'bg-slate-800 text-slate-400'
+              }`}
+            >
+              ♾️
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-black text-cyan-300 uppercase">
+                  2. RESTER ENCLENCHÉ (CONTINU / LATCH)
+                </span>
+                {playMode === 'latch' && (
+                  <span className="px-1.5 py-0.2 bg-cyan-400 text-slate-950 font-black text-[9px] rounded">
+                    ACTIF
+                  </span>
+                )}
+              </div>
+              <p className="text-[10px] text-slate-300 mt-0.5 leading-snug">
+                Un simple clic <strong>maintient la note allumée</strong> en continu pour admirer la figure de Lissajous sans garder le doigt appuyé.
+              </p>
+            </div>
+          </button>
+        </div>
+      </div>
+
       {/* Control Bar: Tuning Mode, Octaves, Intervals, Waveform */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-3 bg-[#070e1c] p-3 rounded-xl border border-[#162744]">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 bg-[#070e1c] p-3 rounded-xl border border-[#162744]">
+
         {/* Tuning Reference */}
         <div>
           <label className="text-[10px] text-slate-500 font-bold block mb-1">ACCORD DE BASE (DIAPASON)</label>
@@ -357,7 +666,7 @@ export const HarmonicPianoPanel: React.FC<HarmonicPianoPanelProps> = ({
         {/* Harmonic Interval X:Y Ratio */}
         <div>
           <label className="text-[10px] text-slate-500 font-bold block mb-1">
-            HARMONIQUE Y:X ({HARMONIC_INTERVALS[selectedRatioIndex].label})
+            HARMONIQUE Y:X ({HARMONIC_INTERVALS[selectedRatioIndex]?.label || 'Ratio'})
           </label>
           <select
             value={selectedRatioIndex}
@@ -366,7 +675,7 @@ export const HarmonicPianoPanel: React.FC<HarmonicPianoPanelProps> = ({
           >
             {HARMONIC_INTERVALS.map((int, i) => (
               <option key={i} value={i}>
-                {int.label} — {int.desc}
+                {int?.label || `Ratio ${i}`} — {int?.desc || ''}
               </option>
             ))}
           </select>
@@ -397,7 +706,7 @@ export const HarmonicPianoPanel: React.FC<HarmonicPianoPanelProps> = ({
       <div className="space-y-2">
         <div className="flex items-center justify-between text-[11px] text-slate-400 px-1">
           <span className="flex items-center gap-1.5 font-bold text-slate-300">
-            <Music className="w-3.5 h-3.5 text-amber-400" /> CLAVIER PHYSIQUE (TOUCHES CLAVIER : A, W, S, E, D, F, T, G, Y, H, U, J, K)
+            <Music className="w-3.5 h-3.5 text-amber-400" /> CLAVIER PHYSIQUE (TOUCHES CLAVIER : A, W, S, E, D, F, T, G, Y, H, U, J, K • ÉCHAP/ESPACE = SILENCE)
           </span>
           <span className="text-[10px] text-amber-400">
             Signes musicaux : 𝄞 Clé de Sol • 𝄢 Clé de Fa • ♩ Noire • ♪ Croche • ♯ Dièse
@@ -411,15 +720,38 @@ export const HarmonicPianoPanel: React.FC<HarmonicPianoPanelProps> = ({
             {keys
               .filter((k) => !k.isBlack)
               .map((k) => {
-                const isActive = activeNoteName?.includes(k.note) && activeNoteName?.includes(`${k.octave}`);
+                const isActive = !isMutedOrSilent && activeNoteName?.includes(k.note) && activeNoteName?.includes(`${k.octave}`);
                 return (
                   <div
                     key={`${k.pitch}-${k.octave}`}
-                    onClick={() => playNote(k.freq, `${k.note}${k.octave}`)}
-                    className={`relative flex flex-col justify-between items-center w-12 h-44 rounded-b-xl border-x border-b transition-all cursor-pointer shadow-md mx-[1px] pt-2 pb-2 ${
+                    onPointerDown={(e) => {
+                      e.preventDefault();
+                      isPointerActiveRef.current = true;
+                      playNote(k.freq, `${k.note}${k.octave}`);
+                    }}
+                    onPointerUp={(e) => {
+                      e.preventDefault();
+                      if (playMode === 'momentary') {
+                        isPointerActiveRef.current = false;
+                        stopNote();
+                      }
+                    }}
+                    onPointerLeave={() => {
+                      if (playMode === 'momentary' && isPointerActiveRef.current) {
+                        isPointerActiveRef.current = false;
+                        stopNote();
+                      }
+                    }}
+                    onPointerCancel={() => {
+                      if (playMode === 'momentary') {
+                        isPointerActiveRef.current = false;
+                        stopNote();
+                      }
+                    }}
+                    className={`relative flex flex-col justify-between items-center w-12 h-44 rounded-b-xl border-x border-b transition-all cursor-pointer shadow-md mx-[1px] pt-2 pb-2 touch-none select-none ${
                       isActive
                         ? 'bg-gradient-to-b from-amber-200 to-amber-400 text-slate-950 border-amber-400 shadow-lg shadow-amber-400/40 translate-y-1'
-                        : 'bg-gradient-to-b from-slate-100 via-slate-200 to-slate-300 hover:from-white hover:to-slate-200 text-slate-900 border-slate-400'
+                        : 'bg-gradient-to-b from-slate-100 via-slate-200 to-slate-300 hover:from-white hover:to-slate-200 text-slate-900 border-slate-400 active:scale-[0.98]'
                     }`}
                   >
                     {/* Top Musical Sign & Glyph */}
@@ -458,20 +790,44 @@ export const HarmonicPianoPanel: React.FC<HarmonicPianoPanelProps> = ({
                 // Each white key is 48px + 2px margin = 50px
                 const leftPos = whiteCountBefore * 50 - 15;
 
-                const isActive = activeNoteName?.includes(k.note) && activeNoteName?.includes(`${k.octave}`);
+                const isActive = !isMutedOrSilent && activeNoteName?.includes(k.note) && activeNoteName?.includes(`${k.octave}`);
 
                 return (
                   <div
                     key={`${k.pitch}-${k.octave}`}
-                    onClick={(e) => {
+                    onPointerDown={(e) => {
                       e.stopPropagation();
+                      e.preventDefault();
+                      isPointerActiveRef.current = true;
                       playNote(k.freq, `${k.note}${k.octave}`);
                     }}
+                    onPointerUp={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      if (playMode === 'momentary') {
+                        isPointerActiveRef.current = false;
+                        stopNote();
+                      }
+                    }}
+                    onPointerLeave={(e) => {
+                      e.stopPropagation();
+                      if (playMode === 'momentary' && isPointerActiveRef.current) {
+                        isPointerActiveRef.current = false;
+                        stopNote();
+                      }
+                    }}
+                    onPointerCancel={(e) => {
+                      e.stopPropagation();
+                      if (playMode === 'momentary') {
+                        isPointerActiveRef.current = false;
+                        stopNote();
+                      }
+                    }}
                     style={{ left: `${leftPos}px` }}
-                    className={`pointer-events-auto absolute top-0 w-8 h-28 rounded-b-lg border border-slate-950 flex flex-col justify-between items-center pt-2 pb-1.5 cursor-pointer z-10 transition-all shadow-xl ${
+                    className={`pointer-events-auto absolute top-0 w-8 h-28 rounded-b-lg border border-slate-950 flex flex-col justify-between items-center pt-2 pb-1.5 cursor-pointer z-10 transition-all shadow-xl touch-none select-none ${
                       isActive
                         ? 'bg-gradient-to-b from-amber-500 to-amber-700 text-white border-amber-400 shadow-amber-500/50 translate-y-1'
-                        : 'bg-gradient-to-b from-slate-900 via-slate-950 to-black hover:from-slate-800 hover:to-slate-900 text-amber-400'
+                        : 'bg-gradient-to-b from-slate-900 via-slate-950 to-black hover:from-slate-800 hover:to-slate-900 text-amber-400 active:scale-[0.98]'
                     }`}
                   >
                     <span className="text-xs font-black text-amber-300">♯</span>
@@ -503,7 +859,7 @@ export const HarmonicPianoPanel: React.FC<HarmonicPianoPanelProps> = ({
             <Sparkles className="w-3.5 h-3.5" /> FRÉQUENCES SACRÉES SOLFEGGIO & CYMATIQUE
           </span>
           <span className="text-[10px] text-slate-500">
-            Harmoniques anciennes établies (396Hz UT à 963Hz SI)
+            Harmoniques anciennes établies ({playMode === 'momentary' ? 'Maintenez pour jouer' : 'Cliquez pour activer'})
           </span>
         </div>
 
@@ -511,8 +867,25 @@ export const HarmonicPianoPanel: React.FC<HarmonicPianoPanelProps> = ({
           {SOLFEGGIO_PRESETS.map((sol) => (
             <button
               key={sol.freq}
-              onClick={() => playSolfeggio(sol)}
-              className="flex flex-col items-center p-2 rounded-xl bg-[#0e192c] hover:bg-[#162744] border border-[#1e3458] transition-all hover:scale-105 group text-center"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                isPointerActiveRef.current = true;
+                playSolfeggio(sol);
+              }}
+              onPointerUp={(e) => {
+                e.preventDefault();
+                if (playMode === 'momentary') {
+                  isPointerActiveRef.current = false;
+                  stopNote();
+                }
+              }}
+              onPointerLeave={() => {
+                if (playMode === 'momentary' && isPointerActiveRef.current) {
+                  isPointerActiveRef.current = false;
+                  stopNote();
+                }
+              }}
+              className="flex flex-col items-center p-2 rounded-xl bg-[#0e192c] hover:bg-[#162744] border border-[#1e3458] transition-all hover:scale-105 active:scale-95 group text-center touch-none select-none"
             >
               <span className="text-xs font-black font-serif" style={{ color: sol.color }}>
                 {sol.sign}

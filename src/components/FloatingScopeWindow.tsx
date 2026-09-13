@@ -29,7 +29,7 @@ interface FloatingScopeWindowProps {
 }
 
 export const FloatingScopeWindow: React.FC<FloatingScopeWindowProps> = ({
-  points,
+  points = [],
   settings,
   onSettingsChange,
   floatingState,
@@ -410,7 +410,7 @@ export const FloatingScopeWindow: React.FC<FloatingScopeWindowProps> = ({
           <>
             <div className="absolute top-2 left-2 pointer-events-none flex flex-col gap-1 text-[10px] text-cyan-400/80 bg-slate-950/70 p-2 rounded border border-cyan-900/40 backdrop-blur-sm">
               <span className="font-bold text-cyan-300">PRESET : {presetName}</span>
-              <span>POINTS : {points.length} VECTEURS</span>
+              <span>POINTS : {points?.length || 0} VECTEURS</span>
               <span>ZOOM : {(settings.zoom * 100).toFixed(0)}%</span>
               <span>ROTATION : {settings.rotation}°</span>
               <span>RÉMANENCE : {(settings.persistence * 100).toFixed(0)}%</span>

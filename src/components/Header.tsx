@@ -3,6 +3,7 @@ import {
   Volume2,
   VolumeX,
   Play,
+  Pause,
   Square,
   Radio,
   Download,
@@ -38,7 +39,8 @@ import {
   AppMode,
   FloatingWindowState,
   ScopeActiveToggles,
-  TabActivityLevels
+  TabActivityLevels,
+  TabMixerChannel
 } from '../types/vectorScope';
 import { downloadWindowsZip } from '../services/pythonAppFiles';
 import { triggerBlobDownload } from '../services/exportUtils';
@@ -67,6 +69,10 @@ interface HeaderProps {
   onDecreaseFont?: () => void;
   onResetFont?: () => void;
   onOpenAiChat?: () => void;
+  isSnappableScopeOpen?: boolean;
+  onToggleSnappableScope?: () => void;
+  tabChannels?: Record<AppMode, TabMixerChannel>;
+  onUpdateTabChannel?: (id: AppMode, updates: Partial<TabMixerChannel>) => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -93,6 +99,10 @@ export const Header: React.FC<HeaderProps> = ({
   onDecreaseFont,
   onResetFont,
   onOpenAiChat,
+  isSnappableScopeOpen = false,
+  onToggleSnappableScope,
+  tabChannels,
+  onUpdateTabChannel,
 }) => {
   const [isExportingZip, setIsExportingZip] = useState(false);
 
@@ -121,6 +131,7 @@ export const Header: React.FC<HeaderProps> = ({
     scopeKey?: keyof ScopeActiveToggles;
   }> = [
     { id: 'main', label: 'LABORATOIRE X/Y', icon: Activity, scopeKey: 'octaGenerators' },
+    { id: 'mixer', label: 'MIXEUR MASTER', icon: Sliders },
     { id: 'sequence_generators', label: 'GÉNÉRATEURS VIDÉO & SÉQUENCES', icon: Video, scopeKey: 'sequenceGenerators' },
     { id: 'piano', label: 'PIANO & NOTES', icon: Music, scopeKey: 'octaGenerators' },
     { id: 'radio', label: 'RADIO & CHANSON', icon: Radio, scopeKey: 'radioAudio' },
@@ -313,6 +324,23 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           </div>
 
+          {/* Snappable / Detachable Scope & Spectral Visualizer Button */}
+          {onToggleSnappableScope && (
+            <button
+              onClick={onToggleSnappableScope}
+              id="btn-toggle-snappable-scope-header"
+              className={`px-2.5 py-1.5 rounded-md text-xs font-mono font-bold flex items-center gap-1.5 transition-all border ${
+                isSnappableScopeOpen
+                  ? 'bg-gradient-to-r from-cyan-500 to-amber-500 text-slate-950 border-cyan-300 shadow-[0_0_12px_rgba(0,245,212,0.4)] scale-105'
+                  : 'bg-[#0b162a] text-cyan-300 border-[#1d3050] hover:border-cyan-500/50'
+              }`}
+              title="Afficher / Masquer l'oscilloscope & analyseur spectral flottant (aimantable et désnappable dans toutes les fenêtres)"
+            >
+              <Activity className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">{isSnappableScopeOpen ? 'SPECTRAL & SCOPE ACTIF' : 'SCOPE & SPECTRAL FLOTTANT'}</span>
+            </button>
+          )}
+
           {/* AI Assistant Chat Trigger in Top Bar as well */}
           {onOpenAiChat && (
             <button
@@ -343,7 +371,8 @@ export const Header: React.FC<HeaderProps> = ({
       {/* Navigation Tabs Bar with USER SPECIFIED:
           1. Voyant d'activité sonore qui flash au même rythme
           2. Bouton Ajouter dans le Scope / Mettre invisible au-dessus de chaque onglet
-          3. Wrap sur 1 ou 2 lignes quand ça ne rentre pas sur une seule ligne */}
+          3. Boutons Pause et Sourdine (Mute) sous chaque onglet
+          4. Wrap sur 1 ou 2 lignes quand ça ne rentre pas sur une seule ligne */}
       <div className="px-3 bg-[#050b14] flex flex-wrap items-center gap-1.5 border-t border-[#121c2e] py-1.5">
         {navTabs.map((tab) => {
           const Icon = tab.icon;
@@ -351,6 +380,10 @@ export const Header: React.FC<HeaderProps> = ({
           const activity = (activityLevels as any)[tab.id] || 0;
           const hasScopeToggle = !!tab.scopeKey;
           const isScopeActive = tab.scopeKey ? scopeToggles[tab.scopeKey] : true;
+          const chan = tabChannels ? tabChannels[tab.id] : undefined;
+          const isPaused = chan ? chan.isPaused : false;
+          const isMuted = chan ? chan.isMuted : false;
+          const inMixer = chan ? chan.inMixer : true;
 
           return (
             <div
@@ -361,7 +394,7 @@ export const Header: React.FC<HeaderProps> = ({
                   : 'bg-[#081120] border-[#132238] hover:border-slate-700'
               }`}
             >
-              {/* Top Sub-Bar: Scope Visibility Toggle button as requested! */}
+              {/* Top Sub-Bar: Scope Visibility Toggle button */}
               {hasScopeToggle ? (
                 <button
                   onClick={(e) => {
@@ -407,6 +440,45 @@ export const Header: React.FC<HeaderProps> = ({
                   title={activity > 0.08 ? `Signal audio actif (~${(activity * 100).toFixed(0)}%)` : 'Silence'}
                 />
               </button>
+
+              {/* USER SPECIFIED: Sous les boutons d'onglets, contrôles PAUSE et SOURDINE */}
+              {onUpdateTabChannel && (
+                <div className="flex items-center gap-1.5 mt-1 pt-0.5 border-t border-[#121f35] w-full justify-center">
+                  {/* Pause Button */}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onUpdateTabChannel(tab.id, { isPaused: !isPaused });
+                    }}
+                    title={isPaused ? `Reprendre la génération pour ${tab.label}` : `Mettre en pause ${tab.label}`}
+                    className={`px-1.5 py-0.5 rounded text-[8px] font-mono font-bold flex items-center gap-0.5 transition-all cursor-pointer ${
+                      isPaused
+                        ? 'bg-amber-500 text-slate-950 border border-amber-400 shadow-md shadow-amber-500/20'
+                        : 'bg-[#060b13] text-amber-300 border border-amber-500/40 hover:bg-amber-500/10'
+                    }`}
+                  >
+                    {isPaused ? <Play className="w-2.5 h-2.5" /> : <Pause className="w-2.5 h-2.5" />}
+                    <span>PAUSE</span>
+                  </button>
+
+                  {/* Sourdine (Mute) Button */}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onUpdateTabChannel(tab.id, { isMuted: !isMuted });
+                    }}
+                    title={isMuted ? `Désactiver la sourdine pour ${tab.label}` : `Mettre en sourdine ${tab.label}`}
+                    className={`px-1.5 py-0.5 rounded text-[8px] font-mono font-bold flex items-center gap-0.5 transition-all cursor-pointer ${
+                      isMuted
+                        ? 'bg-rose-600 text-white border border-rose-400 shadow-md shadow-rose-600/20'
+                        : 'bg-[#060b13] text-rose-400 border border-rose-500/40 hover:bg-rose-500/10'
+                    }`}
+                  >
+                    {isMuted ? <VolumeX className="w-2.5 h-2.5" /> : <Volume2 className="w-2.5 h-2.5" />}
+                    <span>MUTE</span>
+                  </button>
+                </div>
+              )}
             </div>
           );
         })}

@@ -19,21 +19,27 @@ import {
 } from '../services/exportUtils';
 import { exportPointsToSvg, exportPointsToCsv } from '../services/mathEngine';
 
-interface ExportModalProps {
+export interface ExportModalProps {
   isOpen: boolean;
   onClose: () => void;
-  configX: ChannelConfig;
-  configY: ChannelConfig;
-  currentPreset: string;
-  points: Array<[number, number]>;
-  rawTimeDataX: Float32Array;
-  rawTimeDataY: Float32Array;
-  sampleRate: number;
+  sessionData?: any;
+  audioEngine?: any;
+  currentPoints?: Array<[number, number]>;
+  configX?: ChannelConfig;
+  configY?: ChannelConfig;
+  currentPreset?: string;
+  points?: Array<[number, number]>;
+  rawTimeDataX?: Float32Array;
+  rawTimeDataY?: Float32Array;
+  sampleRate?: number;
 }
 
 export const ExportModal: React.FC<ExportModalProps> = ({
   isOpen,
   onClose,
+  sessionData,
+  audioEngine,
+  currentPoints,
   configX,
   configY,
   currentPreset,
@@ -52,11 +58,47 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   if (!isOpen) return null;
 
+  const resolvedConfigX: ChannelConfig = configX || sessionData?.channelX || {
+    waveform: 'sine',
+    frequency: 220,
+    amplitude: 0.8,
+    phase: 0,
+    offset: 0,
+    polarity: 1,
+    gain: 1.0,
+    mute: false,
+    solo: false,
+    fmDepth: 0,
+    fmRate: 1,
+    customHarmonics: [1, 0, 0, 0, 0, 0, 0, 0],
+  };
+
+  const resolvedConfigY: ChannelConfig = configY || sessionData?.channelY || {
+    waveform: 'cosine',
+    frequency: 220,
+    amplitude: 0.8,
+    phase: 0,
+    offset: 0,
+    polarity: 1,
+    gain: 1.0,
+    mute: false,
+    solo: false,
+    fmDepth: 0,
+    fmRate: 1,
+    customHarmonics: [1, 0, 0, 0, 0, 0, 0, 0],
+  };
+
+  const resolvedPreset = currentPreset || sessionData?.preset || 'Personnalisé';
+  const resolvedPoints = points || currentPoints || [];
+  const resolvedRawX = rawTimeDataX || (audioEngine ? audioEngine.getRawTimeDataX?.() : new Float32Array(2048)) || new Float32Array(2048);
+  const resolvedRawY = rawTimeDataY || (audioEngine ? audioEngine.getRawTimeDataY?.() : new Float32Array(2048)) || new Float32Array(2048);
+  const resolvedSampleRate = sampleRate || audioEngine?.getSampleRate?.() || 48000;
+
   // Check for potential clipping
   let peak = 0;
-  for (let i = 0; i < rawTimeDataX.length; i++) {
-    const ax = Math.abs(rawTimeDataX[i]);
-    const ay = Math.abs(rawTimeDataY[i]);
+  for (let i = 0; i < resolvedRawX.length; i++) {
+    const ax = Math.abs(resolvedRawX[i]);
+    const ay = Math.abs(resolvedRawY[i]);
     if (ax > peak) peak = ax;
     if (ay > peak) peak = ay;
   }
@@ -70,16 +112,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       const l = new Float32Array(totalSamples);
       const r = new Float32Array(totalSamples);
 
-      // Repeat from actual buffers
+      // Repeat from actual buffers or fallback
+      const lenX = Math.max(1, resolvedRawX.length);
+      const lenY = Math.max(1, resolvedRawY.length);
       for (let i = 0; i < totalSamples; i++) {
-        l[i] = rawTimeDataX[i % rawTimeDataX.length];
-        r[i] = rawTimeDataY[i % rawTimeDataY.length];
+        l[i] = resolvedRawX[i % lenX];
+        r[i] = resolvedRawY[i % lenY];
       }
 
-      const { blob, hasClipped } = encodeStereoWav(l, r, sampleRate, targetSampleRate, bitDepth, autoLimit);
+      const { blob, hasClipped } = encodeStereoWav(l, r, resolvedSampleRate, targetSampleRate, bitDepth, autoLimit);
       triggerBlobDownload(
         blob,
-        `genesis_vector_${currentPreset.toLowerCase()}_${targetSampleRate}Hz_${bitDepth}bit.wav`
+        `genesis_vector_${resolvedPreset.toLowerCase()}_${targetSampleRate}Hz_${bitDepth}bit.wav`
       );
     } finally {
       setIsProcessing(false);
@@ -93,12 +137,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       const totalSamples = Math.floor(targetSampleRate * Math.max(3, durationSec));
       const l = new Float32Array(totalSamples);
       const r = new Float32Array(totalSamples);
+      const lenX = Math.max(1, resolvedRawX.length);
+      const lenY = Math.max(1, resolvedRawY.length);
       for (let i = 0; i < totalSamples; i++) {
-        l[i] = rawTimeDataX[i % rawTimeDataX.length];
-        r[i] = rawTimeDataY[i % rawTimeDataY.length];
+        l[i] = resolvedRawX[i % lenX];
+        r[i] = resolvedRawY[i % lenY];
       }
 
-      const { blob } = encodeStereoWav(l, r, sampleRate, targetSampleRate, bitDepth, autoLimit);
+      const { blob } = encodeStereoWav(l, r, resolvedSampleRate, targetSampleRate, bitDepth, autoLimit);
 
       // Render a clean preview canvas for preview.png
       const offscreen = document.createElement('canvas');
@@ -110,9 +156,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       ctx.strokeStyle = '#00f5d4';
       ctx.lineWidth = 2.5;
       ctx.beginPath();
-      for (let i = 0; i < points.length; i++) {
-        const px = 400 + points[i][0] * 320;
-        const py = 400 - points[i][1] * 320;
+      for (let i = 0; i < resolvedPoints.length; i++) {
+        const px = 400 + resolvedPoints[i][0] * 320;
+        const py = 400 - resolvedPoints[i][1] * 320;
         if (i === 0) ctx.moveTo(px, py);
         else ctx.lineTo(px, py);
       }
@@ -122,20 +168,20 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         timestamp: new Date().toISOString(),
         duration: durationSec,
         sampleRate: targetSampleRate,
-        channelParams: { x: configX, y: configY },
-        preset: currentPreset,
+        channelParams: { x: resolvedConfigX, y: resolvedConfigY },
+        preset: resolvedPreset,
         events: [
           { time: 0, event: 'INITIALIZE_VECTOR_LAB' },
-          { time: 0.1, event: 'APPLY_PRESET', details: currentPreset },
+          { time: 0.1, event: 'APPLY_PRESET', details: resolvedPreset },
           { time: 0.5, event: 'CAPTURE_TRACE_STABLE' },
         ],
         checksum: '',
       };
 
-      const zipBlob = await createExperimentZipBundle(experiment, blob, offscreen, points);
+      const zipBlob = await createExperimentZipBundle(experiment, blob, offscreen, resolvedPoints);
       triggerBlobDownload(
         zipBlob,
-        `GENESIS_EXPERIMENT_${currentPreset.toUpperCase()}_${Date.now()}.zip`
+        `GENESIS_EXPERIMENT_${resolvedPreset.toUpperCase()}_${Date.now()}.zip`
       );
     } finally {
       setIsProcessing(false);
@@ -144,20 +190,20 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   };
 
   const handleExportSvg = () => {
-    let ptsToExport = points;
+    let ptsToExport = resolvedPoints;
     if (svgPeriodChoice === '1_period') {
-      ptsToExport = points.slice(0, Math.min(256, points.length));
+      ptsToExport = resolvedPoints.slice(0, Math.min(256, resolvedPoints.length));
     } else if (svgPeriodChoice === 'multi_periods') {
-      ptsToExport = points.slice(0, Math.min(1024, points.length));
+      ptsToExport = resolvedPoints.slice(0, Math.min(1024, resolvedPoints.length));
     }
     const svgStr = exportPointsToSvg(ptsToExport, 800, 800, '#00f5d4');
-    triggerTextDownload(svgStr, `genesis_vector_${currentPreset.toLowerCase()}.svg`, 'image/svg+xml');
+    triggerTextDownload(svgStr, `genesis_vector_${resolvedPreset.toLowerCase()}.svg`, 'image/svg+xml');
     onClose();
   };
 
   const handleExportCsv = () => {
-    const csvStr = exportPointsToCsv(points, sampleRate);
-    triggerTextDownload(csvStr, `genesis_vector_xy_${currentPreset.toLowerCase()}.csv`, 'text/csv');
+    const csvStr = exportPointsToCsv(resolvedPoints, resolvedSampleRate);
+    triggerTextDownload(csvStr, `genesis_vector_xy_${resolvedPreset.toLowerCase()}.csv`, 'text/csv');
     onClose();
   };
 

@@ -12,18 +12,24 @@ import {
   Sliders,
   ChevronRight,
   Zap,
-  Repeat
+  Repeat,
+  Move,
+  Eye,
+  EyeOff
 } from 'lucide-react';
-import { TimelineScene, TimelineTransitionType, PresetName } from '../types/vectorScope';
+import { TimelineScene, TimelineTransitionType, PresetName, ScopeDisplaySettings } from '../types/vectorScope';
 import { generatePresetPoints } from '../services/mathEngine';
 import { generatePresetVectorImage } from '../services/imageVectorizer';
 import { generateTextVectorPoints } from '../services/vectorFont';
+import { SnappableScopeWindow } from './SnappableScopeWindow';
 
 interface TimelineSceneLabProps {
   scenes: TimelineScene[];
   onScenesChange: (newScenes: TimelineScene[]) => void;
   onSendFrameToScope: (points: Array<[number, number]>, sceneLabel: string) => void;
   isActiveInScope: boolean;
+  scopeSettings?: ScopeDisplaySettings;
+  onScopeSettingsChange?: (updates: Partial<ScopeDisplaySettings>) => void;
 }
 
 const DEFAULT_SCENES: TimelineScene[] = [
@@ -67,11 +73,29 @@ const DEFAULT_SCENES: TimelineScene[] = [
   },
 ];
 
+const DEFAULT_SCOPE_SETTINGS: ScopeDisplaySettings = {
+  thickness: 2,
+  brightness: 1.0,
+  persistence: 0.75,
+  zoom: 1.0,
+  rotation: 0,
+  centerX: 0,
+  centerY: 0,
+  normalize: true,
+  showGrid: true,
+  showAxes: true,
+  mode: 'phosphor',
+  colorScheme: 'green_phosphor',
+  handMode: 'left_handed',
+};
+
 export const TimelineSceneLab: React.FC<TimelineSceneLabProps> = ({
   scenes = DEFAULT_SCENES,
   onScenesChange,
   onSendFrameToScope,
   isActiveInScope,
+  scopeSettings = DEFAULT_SCOPE_SETTINGS,
+  onScopeSettingsChange,
 }) => {
   const [activeScenes, setActiveScenes] = useState<TimelineScene[]>(
     scenes.length > 0 ? scenes : DEFAULT_SCENES
@@ -81,10 +105,24 @@ export const TimelineSceneLab: React.FC<TimelineSceneLabProps> = ({
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [loop, setLoop] = useState<boolean>(true);
 
+  // Floating & Snappable Scope overlay state
+  const [isSnappableScopeOpen, setIsSnappableScopeOpen] = useState<boolean>(true);
+  const [currentFramePoints, setCurrentFramePoints] = useState<Array<[number, number]>>([]);
+  const [isScopePaused, setIsScopePaused] = useState<boolean>(false);
+  const [localScopeSettings, setLocalScopeSettings] = useState<ScopeDisplaySettings>(scopeSettings);
+
   const animFrameRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(performance.now());
 
   const totalDuration = activeScenes.reduce((acc, s) => acc + s.duration, 0);
+
+  // Sync settings updates
+  const handleScopeSettingsUpdate = (updates: Partial<ScopeDisplaySettings>) => {
+    setLocalScopeSettings((prev) => ({ ...prev, ...updates }));
+    if (onScopeSettingsChange) {
+      onScopeSettingsChange(updates);
+    }
+  };
 
   // Sync back to parent
   const updateScenes = (newSc: TimelineScene[]) => {
@@ -161,9 +199,9 @@ export const TimelineSceneLab: React.FC<TimelineSceneLabProps> = ({
     return () => cancelAnimationFrame(animFrameRef.current);
   }, [isPlaying, totalDuration, loop]);
 
-  // Frame calculation and transmission to scope
+  // Frame calculation and transmission to scope + local snappable scope
   useEffect(() => {
-    if (!isActiveInScope || activeScenes.length === 0) return;
+    if (activeScenes.length === 0) return;
 
     const { scene, localTime, progress, nextScene } = getSceneAtTime(currentTime);
     if (!scene) return;
@@ -200,7 +238,11 @@ export const TimelineSceneLab: React.FC<TimelineSceneLabProps> = ({
       }
     }
 
-    onSendFrameToScope(pts, `SCÈNE: ${scene.name} (${currentTime.toFixed(1)}s)`);
+    setCurrentFramePoints(pts);
+
+    if (isActiveInScope) {
+      onSendFrameToScope(pts, `SCÈNE: ${scene.name} (${currentTime.toFixed(1)}s)`);
+    }
   }, [currentTime, isActiveInScope, activeScenes]);
 
   const selectedScene = activeScenes.find((s) => s.id === selectedSceneId) || activeScenes[0];
@@ -243,7 +285,25 @@ export const TimelineSceneLab: React.FC<TimelineSceneLabProps> = ({
   };
 
   return (
-    <div className="bg-[#0a1324] border border-[#14233c] rounded-xl p-4 font-mono text-xs text-slate-300 shadow-xl space-y-4">
+    <div className="bg-[#0a1324] border border-[#14233c] rounded-xl p-4 font-mono text-xs text-slate-300 shadow-xl space-y-4 relative">
+      {/* Snappable Floating Oscilloscope Window for Timeline & Scenes */}
+      {isSnappableScopeOpen && (
+        <SnappableScopeWindow
+          points={currentFramePoints}
+          settings={localScopeSettings}
+          onSettingsChange={handleScopeSettingsUpdate}
+          presetName={selectedScene?.name || 'Timeline & Scène'}
+          isPaused={isScopePaused}
+          onTogglePause={() => setIsScopePaused(!isScopePaused)}
+          currentLabel={`SCÈNE : ${selectedScene?.name || 'En cours'}`}
+          timecodeText={`${currentTime.toFixed(1)}s / ${totalDuration.toFixed(1)}s`}
+          isPlaying={isPlaying}
+          onTogglePlay={() => setIsPlaying(!isPlaying)}
+          defaultSnap="top_right"
+          onClose={() => setIsSnappableScopeOpen(false)}
+        />
+      )}
+
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#14233c] pb-3">
         <div className="flex items-center gap-2.5">
@@ -263,8 +323,22 @@ export const TimelineSceneLab: React.FC<TimelineSceneLabProps> = ({
           </div>
         </div>
 
-        {/* Live to Scope button */}
+        {/* Live to Scope button & Toggle Snappable Scope */}
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setIsSnappableScopeOpen(!isSnappableScopeOpen)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2 border transition-all ${
+              isSnappableScopeOpen
+                ? 'bg-cyan-500 text-slate-950 border-cyan-300 shadow-md shadow-cyan-500/20'
+                : 'bg-[#061022] text-cyan-300 border-cyan-800 hover:bg-[#0c1f3d]'
+            }`}
+            title="Afficher / Masquer l'oscilloscope déplaçable et snappable"
+          >
+            <Move className="w-3.5 h-3.5" />
+            <span>{isSnappableScopeOpen ? 'OSCILLOSCOPE SNAPPABLE (ACTIF)' : 'AFFICHER OSCILLOSCOPE'}</span>
+          </button>
+
           <button
             onClick={() => {
               if (!isPlaying) setIsPlaying(true);
@@ -276,7 +350,7 @@ export const TimelineSceneLab: React.FC<TimelineSceneLabProps> = ({
             }`}
           >
             <Zap className="w-3.5 h-3.5" />
-            <span>{isActiveInScope ? 'TIMELINE EN COURS DANS SCOPE' : 'ACTIVER TIMELINE DANS SCOPE'}</span>
+            <span>{isActiveInScope ? 'SON TIMELINE ACTIF' : 'ACTIVER SON DANS SCOPE'}</span>
           </button>
         </div>
       </div>

@@ -22,12 +22,24 @@ import {
   Zap,
   Info,
   Paintbrush,
-  Palette,
-  Droplet,
-  Move
+  Move,
+  Pin,
+  PinOff,
+  ExternalLink,
+  GripHorizontal,
+  Activity,
+  Radio,
+  Volume2
 } from 'lucide-react';
 import { ScopeDisplaySettings, ScopeRenderMode, AppMode, PatternFillChannel, TemporalCorrectionSpan } from '../types/vectorScope';
-import { exportPointsToSvg, exportPointsToCsv } from '../services/mathEngine';
+import {
+  exportPointsToSvg,
+  exportPointsToCsv,
+  updateAndGenerateContourNoise,
+  BouncingNoiseParticle,
+  getContourBoundingBox,
+  isPointInContourPolygon
+} from '../services/mathEngine';
 import { triggerBlobDownload, triggerTextDownload } from '../services/exportUtils';
 import { savePattern } from '../services/patternStorage';
 import { loadSequenceGenerators, saveSequenceGenerators } from '../services/sequenceGeneratorStorage';
@@ -41,6 +53,8 @@ interface ZoneCOscilloscopeProps {
   onTogglePause: () => void;
   onNavigateToSource?: (moduleName: AppMode) => void;
   onSavedToPatternLibrary?: (patternName: string) => void;
+  isDetached?: boolean;
+  onToggleDetach?: () => void;
 }
 
 interface SegmentMeta {
@@ -54,7 +68,7 @@ interface SegmentMeta {
 }
 
 export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
-  points,
+  points = [],
   settings,
   onSettingsChange,
   presetName,
@@ -62,12 +76,85 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
   onTogglePause,
   onNavigateToSource,
   onSavedToPatternLibrary,
+  isDetached,
+  onToggleDetach,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [showControls, setShowControls] = useState(false);
   const [canvasDimensions, setCanvasDimensions] = useState({ width: 600, height: 600 });
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Floating / Detached Scope State (Détachable de son socle)
+  const [internalDetached, setInternalDetached] = useState<boolean>(false);
+  const isDetachedEffective = isDetached !== undefined ? isDetached : internalDetached;
+  const toggleDetach = () => {
+    if (onToggleDetach) {
+      onToggleDetach();
+    } else {
+      setInternalDetached(!internalDetached);
+    }
+  };
+
+  const [detachedSize, setDetachedSize] = useState<number>(420); // 320, 420, 560
+  const [floatingPos, setFloatingPos] = useState<{ x: number; y: number }>(() => ({
+    x: typeof window !== 'undefined' ? Math.max(20, window.innerWidth - 460) : 100,
+    y: 80,
+  }));
+  const [isDraggingFloating, setIsDraggingFloating] = useState(false);
+  const dragStartRef = useRef<{ startX: number; startY: number; initX: number; initY: number }>({
+    startX: 0,
+    startY: 0,
+    initX: 0,
+    initY: 0,
+  });
+
+  const handleStartFloatingDrag = (e: React.PointerEvent) => {
+    e.preventDefault();
+    setIsDraggingFloating(true);
+    dragStartRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      initX: floatingPos.x,
+      initY: floatingPos.y,
+    };
+  };
+
+  useEffect(() => {
+    if (!isDraggingFloating) return;
+
+    const handlePointerMove = (e: PointerEvent) => {
+      const dx = e.clientX - dragStartRef.current.startX;
+      const dy = e.clientY - dragStartRef.current.startY;
+      const maxX = Math.max(10, window.innerWidth - detachedSize - 10);
+      const maxY = Math.max(10, window.innerHeight - detachedSize - 60);
+
+      setFloatingPos({
+        x: Math.min(Math.max(10, dragStartRef.current.initX + dx), maxX),
+        y: Math.min(Math.max(10, dragStartRef.current.initY + dy), maxY),
+      });
+    };
+
+    const handlePointerUp = () => {
+      setIsDraggingFloating(false);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+  }, [isDraggingFloating, detachedSize]);
+
+  // Adjust canvas size when in detached mode
+  useEffect(() => {
+    if (isDetachedEffective) {
+      const cSize = Math.max(260, detachedSize - 32);
+      setCanvasDimensions({ width: cSize, height: cSize });
+    }
+  }, [isDetachedEffective, detachedSize]);
 
   // Line inspection and deletion state
   const [frozenPoints, setFrozenPoints] = useState<Array<[number, number]>>([]);
@@ -78,13 +165,35 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
 
   // USER SPECIFIED: Color system per line and void fill channels
   const [segmentColors, setSegmentColors] = useState<Record<number, string>>({});
+  const [pointColors, setPointColors] = useState<string[]>([]);
   const [fillChannels, setFillChannels] = useState<PatternFillChannel[]>([]);
-  const [pauseToolMode, setPauseToolMode] = useState<'inspect' | 'fill' | 'nudge'>('inspect');
-  const [activeColor, setActiveColor] = useState<string>('#f59e0b');
+  const [pauseToolMode, setPauseToolMode] = useState<'inspect' | 'fill' | 'nudge' | 'left_brush'>('inspect');
+  const [activeColor, setActiveColor] = useState<string>('#ffffff');
   const [fillOpacity, setFillOpacity] = useState<number>(0.65);
   const [fillStyle, setFillStyle] = useState<'solid' | 'neon_glow' | 'crt_hatch'>('solid');
   const [showChannelsDrawer, setShowChannelsDrawer] = useState<boolean>(false);
   const channelMasksRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
+
+  // Left-Handed / Right-Handed ergonomic mode
+  const [handMode, setHandMode] = useState<'left_handed' | 'right_handed'>(() => {
+    try {
+      const saved = localStorage.getItem('genesis_hand_mode');
+      return (saved as any) || 'left_handed'; // Default to Left-Handed for artistic ergonomics
+    } catch {
+      return 'left_handed';
+    }
+  });
+
+  const handleToggleHandMode = () => {
+    const next = handMode === 'left_handed' ? 'right_handed' : 'left_handed';
+    setHandMode(next);
+    try {
+      localStorage.setItem('genesis_hand_mode', next);
+    } catch {}
+    if (onSettingsChange) {
+      onSettingsChange({ handMode: next });
+    }
+  };
 
   // Nudge / Tasser avec la souris state (User request: déplacer généralement pendant pause)
   const [nudgeOffset, setNudgeOffset] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
@@ -92,25 +201,13 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
   const [nudgeDragStart, setNudgeDragStart] = useState<{ x: number; y: number } | null>(null);
   const [nudgeSpan, setNudgeSpan] = useState<TemporalCorrectionSpan>('5_sec');
 
-  // Preset palette for fast selection
-  const COLOR_PALETTE = [
-    { label: 'Cyan P31', hex: '#00f5d4' },
-    { label: 'Vert Laser', hex: '#39ff14' },
-    { label: 'Ambre CRT', hex: '#ffb703' },
-    { label: 'Or Solaire', hex: '#fbbf24' },
-    { label: 'Rose Néon', hex: '#f43f5e' },
-    { label: 'Magenta', hex: '#ec4899' },
-    { label: 'Violet Plasma', hex: '#a855f7' },
-    { label: 'Bleu Électrique', hex: '#38bdf8' },
-    { label: 'Blanc Pur', hex: '#ffffff' },
-    { label: 'Rouge Feu', hex: '#ef4444' },
-    { label: 'Émeraude', hex: '#10b981' },
-  ];
+  // Simulation ref for Bouncing White Noise Electron Beam Particles
+  const noiseParticlesRef = useRef<BouncingNoiseParticle[]>([]);
 
   // Synchronize frozen points when pause toggled
   useEffect(() => {
     if (isPaused) {
-      if (frozenPoints.length === 0 && points.length > 0) {
+      if (frozenPoints.length === 0 && points && points.length > 0) {
         setFrozenPoints([...points]);
         setDeletedSegmentIndices(new Set());
         setSelectedSegmentIdx(null);
@@ -123,11 +220,11 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
   }, [isPaused]);
 
   // Points to render: live or frozen (with deleted lines filtered out)
-  const activePoints = isPaused && frozenPoints.length > 0 ? frozenPoints : points;
+  const activePoints = isPaused && frozenPoints.length > 0 ? frozenPoints : (points || []);
 
-  // Compute segment breakdown for interactive line picking
+  // Compute segment breakdown for interactive line picking & multi-color drawing
   const segmentsMeta: SegmentMeta[] = useMemo(() => {
-    if (!isPaused || activePoints.length < 2) return [];
+    if (activePoints.length < 2) return [];
 
     const segs: SegmentMeta[] = [];
     const N = activePoints.length;
@@ -168,17 +265,23 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
     return segs;
   }, [isPaused, activePoints]);
 
-  // ResizeObserver for responsive high-res canvas
+  const screenContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // ResizeObserver for responsive high-res canvas measuring the CRT screen container
   useEffect(() => {
-    if (!containerRef.current) return;
+    const target = screenContainerRef.current || containerRef.current;
+    if (!target) return;
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        const size = Math.min(entry.contentRect.width, entry.contentRect.height > 0 ? entry.contentRect.height : 600);
-        const effectiveSize = Math.max(300, Math.floor(size));
-        setCanvasDimensions({ width: effectiveSize, height: effectiveSize });
+        const rectW = entry.contentRect.width;
+        const rectH = entry.contentRect.height;
+        const availableSize = rectH > 50 ? Math.min(rectW, rectH) : rectW;
+        const effectiveSize = Math.max(340, Math.min(720, Math.floor(availableSize)));
+        window.requestAnimationFrame(() => { setCanvasDimensions(prev => {          if (prev.width === effectiveSize && prev.height === effectiveSize) return prev;          return { width: effectiveSize, height: effectiveSize };        });
+        });
       }
     });
-    observer.observe(containerRef.current);
+    observer.observe(target);
     return () => observer.disconnect();
   }, []);
 
@@ -194,13 +297,17 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
     const cx = w / 2;
     const cy = h / 2;
 
-    // CRT Phosphor Colors
-    let beamColorHex = '#00f5d4'; // Cyan P31
+    // CRT Phosphor Colors & Pattern custom color
+    let beamColorHex = settings.primaryColor || '#00f5d4'; // Default fallback
     if (settings.colorScheme === 'green_phosphor') beamColorHex = '#39ff14'; // Green P1
-    if (settings.colorScheme === 'amber_phosphor') beamColorHex = '#ffb703'; // Amber P3
-    if (settings.colorScheme === 'white_phosphor') beamColorHex = '#f8fafc'; // White P4
-    if (settings.colorScheme === 'blue_phosphor') beamColorHex = '#38bdf8'; // Blue P11
-    if (settings.colorScheme === 'gold_phosphor') beamColorHex = '#fbbf24'; // Gold Lotus
+    else if (settings.colorScheme === 'amber_phosphor') beamColorHex = '#ffb703'; // Amber P3
+    else if (settings.colorScheme === 'white_phosphor') beamColorHex = '#f8fafc'; // White P4
+    else if (settings.colorScheme === 'blue_phosphor') beamColorHex = '#38bdf8'; // Blue P11
+    else if (settings.colorScheme === 'gold_phosphor') beamColorHex = '#fbbf24'; // Gold Lotus
+    else if (settings.colorScheme === 'earthy_phosphor') beamColorHex = '#ffffff'; // White outlines / Earth Brown fill
+    else if (settings.colorScheme === 'custom' || settings.primaryColor) {
+      beamColorHex = settings.primaryColor || '#00f5d4';
+    }
 
     // Phosphor Decay / Accumulation handling
     if (settings.mode === 'accumulation') {
@@ -278,55 +385,123 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
     const sinR = Math.sin(rotRad);
 
     // ------------------------------------------------------------------------
-    // USER SPECIFIED: Draw Active Fill Channels (Void Fills with multiple channels)
+    // USER SPECIFIED: Bruit blanc à l'intérieur des fréquences demandées
+    // Confiné mathématiquement à l'intérieur du motif (ex: lapin blanc)
+    // Rebondit sur le contour du motif. Tout l'extérieur est éliminé !
     // ------------------------------------------------------------------------
-    if (fillChannels.length > 0) {
-      fillChannels.forEach((chan) => {
-        if (!chan.enabled) return;
-        const maskCanvas = channelMasksRef.current.get(chan.id);
-        if (!maskCanvas) return;
+    const isNoiseEnabled = settings.noiseFillEnabled ?? true;
+    if (isNoiseEnabled && activePoints.length >= 4) {
+      ctx.save();
 
-        ctx.save();
-        ctx.globalAlpha = chan.opacity;
+      // Step 1: Strict geometric clipping mask matching the motif polygon contour
+      ctx.beginPath();
+      let firstPt = true;
+      for (let i = 0; i < activePoints.length; i++) {
+        const rawX = activePoints[i][0];
+        const rawY = activePoints[i][1];
+        const rx = rawX * cosR - rawY * sinR;
+        const ry = rawX * sinR + rawY * cosR;
+        const px = cx + rx * scaleX;
+        const py = cy - ry * scaleY;
 
-        if (chan.style === 'neon_glow') {
-          ctx.shadowColor = chan.color;
-          ctx.shadowBlur = 18 * settings.brightness;
+        if (firstPt) {
+          ctx.moveTo(px, py);
+          firstPt = false;
         } else {
-          ctx.shadowBlur = 0;
+          ctx.lineTo(px, py);
         }
+      }
+      ctx.closePath();
+      ctx.clip(); // Guaranteed zero drawing outside the motif calculation!
 
-        // Tint the offscreen mask with the channel's chosen color
-        const tempC = document.createElement('canvas');
-        tempC.width = w;
-        tempC.height = h;
-        const tCtx = tempC.getContext('2d');
-        if (tCtx) {
-          tCtx.drawImage(maskCanvas, 0, 0);
-          tCtx.globalCompositeOperation = 'source-in';
-          tCtx.fillStyle = chan.color;
-          tCtx.fillRect(0, 0, w, h);
+      // Step 2: Generate and simulate white noise particles bouncing inside the contour
+      const noiseFreq = settings.noiseFrequency || 4400;
+      const noiseDensity = settings.noiseDensity || 260;
+      const bounceSpeed = settings.noiseBounceSpeed || 1.2;
+      const noiseIntensity = settings.noiseIntensity || 0.85;
+      const bounceMode = settings.noiseBounceMode || 'specular';
 
-          if (chan.style === 'crt_hatch') {
-            // Horizontal CRT raster scanlines
-            tCtx.globalCompositeOperation = 'destination-out';
-            tCtx.fillStyle = '#000000';
-            for (let scanY = 0; scanY < h; scanY += 4) {
-              tCtx.fillRect(0, scanY, w, 2);
-            }
+      const noisePoints = updateAndGenerateContourNoise(
+        activePoints,
+        noiseParticlesRef.current,
+        noiseDensity,
+        noiseFreq,
+        bounceSpeed,
+        bounceMode,
+        0.016
+      );
+
+      // Step 3: Draw interior resonant white noise electron sparks
+      ctx.fillStyle = '#ffffff';
+      ctx.shadowColor = '#ffffff';
+      ctx.shadowBlur = 6 * settings.brightness * noiseIntensity;
+
+      for (let i = 0; i < noisePoints.length; i++) {
+        const np = noisePoints[i];
+        const rx = np.x * cosR - np.y * sinR;
+        const ry = np.x * sinR + np.y * cosR;
+        const px = cx + rx * scaleX;
+        const py = cy - ry * scaleY;
+
+        ctx.globalAlpha = np.brightness * noiseIntensity * Math.min(1.0, 0.95 * settings.brightness);
+        ctx.beginPath();
+        const ptSize = Math.max(1, 1.2 * settings.thickness * (0.6 + 0.4 * Math.random()));
+        ctx.arc(px, py, ptSize, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Connect stochastic micro-sparks for high frequency laser texture
+        if (i > 0 && i % 4 === 0) {
+          const prev = noisePoints[i - 1];
+          const prx = prev.x * cosR - prev.y * sinR;
+          const pry = prev.x * sinR + prev.y * cosR;
+          const ppx = cx + prx * scaleX;
+          const ppy = cy - pry * scaleY;
+          const distSq = (px - ppx) ** 2 + (py - ppy) ** 2;
+          if (distSq < (w * 0.08) ** 2) {
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 0.8 * settings.thickness;
+            ctx.globalAlpha = 0.3 * noiseIntensity;
+            ctx.beginPath();
+            ctx.moveTo(ppx, ppy);
+            ctx.lineTo(px, py);
+            ctx.stroke();
           }
-
-          ctx.drawImage(tempC, 0, 0);
         }
-        ctx.restore();
-      });
+      }
+
+      ctx.restore();
     }
 
     ctx.save();
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    // Bloom & glow setup
+    // Draw Fill Channels (Remplissage) under the outlines
+    if (fillChannels && fillChannels.length > 0) {
+      fillChannels.forEach((chan) => {
+        if (!chan.enabled || !chan.pixelPoints || chan.pixelPoints.length === 0) return;
+        ctx.save();
+        ctx.fillStyle = chan.color || '#8b4513';
+        // Opacity is slightly scaled by overall brightness
+        ctx.globalAlpha = (chan.opacity !== undefined ? chan.opacity : 0.6) * Math.min(1.2, settings.brightness);
+        
+        if (chan.style === 'neon_glow' || settings.colorScheme === 'earthy_phosphor') {
+          ctx.shadowColor = chan.color || '#8b4513';
+          ctx.shadowBlur = 8 * settings.brightness;
+        }
+
+        const ptSize = Math.max(1, settings.thickness * 0.7);
+        for (let i = 0; i < chan.pixelPoints.length; i++) {
+          const [px, py] = chan.pixelPoints[i];
+          if (px >= 0 && px < w && py >= 0 && py < h) {
+            ctx.fillRect(px - ptSize / 2, py - ptSize / 2, ptSize, ptSize);
+          }
+        }
+        ctx.restore();
+      });
+    }
+
+    // Bloom & glow setup for outlines
     if (settings.mode === 'phosphor') {
       ctx.shadowColor = beamColorHex;
       ctx.shadowBlur = 8 * settings.brightness;
@@ -340,14 +515,17 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
     ctx.fillStyle = beamColorHex;
     ctx.lineWidth = settings.thickness;
 
-    // If Paused: Draw segments allowing individual highlight, custom line colors, and omission of deleted lines
-    if (isPaused && segmentsMeta.length > 0) {
+    const isEarthy = settings.colorScheme === 'earthy_phosphor';
+    const hasSegmentColors = Object.keys(segmentColors).length > 0;
+    const hasPointColors = pointColors && pointColors.length > 0;
+
+    // Use segment-by-segment drawing if paused, using earthy theme, or using custom segment colors
+    if ((isPaused || isEarthy || hasSegmentColors || hasPointColors) && segmentsMeta.length > 0) {
       segmentsMeta.forEach((seg) => {
         if (deletedSegmentIndices.has(seg.index)) return; // Skipped / deleted!
 
         const isSelected = selectedSegmentIdx === seg.index;
         const isHovered = hoveredSegmentIdx === seg.index;
-        const customColor = segmentColors[seg.index];
 
         ctx.save();
         if (isSelected) {
@@ -360,15 +538,34 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
           ctx.lineWidth = Math.max(2.5, settings.thickness * 1.8);
           ctx.shadowColor = '#fbbf24';
           ctx.shadowBlur = 10;
-        } else if (customColor) {
-          // USER SPECIFIED: Individual assigned segment color
-          ctx.strokeStyle = customColor;
-          ctx.lineWidth = settings.thickness * 1.2;
-          ctx.shadowColor = customColor;
-          ctx.shadowBlur = 8 * settings.brightness;
+        } else if (isEarthy) {
+          if (seg.isReturnLine) {
+            ctx.strokeStyle = '#8b4513'; // Earth earthy brown for transition return lines
+            ctx.globalAlpha = Math.min(1.0, 0.45 * settings.brightness);
+            ctx.lineWidth = settings.thickness * 0.8;
+            if (settings.mode === 'phosphor') {
+              ctx.shadowColor = '#8b4513';
+              ctx.shadowBlur = 4 * settings.brightness;
+            }
+          } else {
+            ctx.strokeStyle = '#ffffff'; // White high intensity contours
+            ctx.globalAlpha = Math.min(1.0, 1.0 * settings.brightness);
+            ctx.lineWidth = settings.thickness * 1.3;
+            if (settings.mode === 'phosphor') {
+              ctx.shadowColor = '#ffffff';
+              ctx.shadowBlur = 12 * settings.brightness;
+            }
+          }
         } else if (seg.isReturnLine) {
           ctx.strokeStyle = '#f97316'; // Orange warning highlight for return lines
           ctx.lineWidth = settings.thickness * 1.2;
+        } else if (segmentColors[seg.index]) {
+          ctx.strokeStyle = segmentColors[seg.index];
+          ctx.lineWidth = settings.thickness;
+          if (settings.mode === 'phosphor') {
+            ctx.shadowColor = segmentColors[seg.index];
+            ctx.shadowBlur = 8 * settings.brightness;
+          }
         } else {
           ctx.strokeStyle = beamColorHex;
           ctx.lineWidth = settings.thickness;
@@ -427,6 +624,7 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
 
         if (settings.mode === 'phosphor' && settings.thickness > 1.5) {
           ctx.shadowBlur = 14 * settings.brightness;
+          ctx.stroke();
           ctx.lineWidth = settings.thickness * 0.6;
           ctx.stroke();
         }
@@ -750,6 +948,113 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
     }
   };
 
+  // USER SPECIFIED: Encode color directly into the pattern points (Left-Handed / Laser Chroma Encoding)
+  const handleEncodeCurrentColorsIntoPattern = () => {
+    const encodedPointColors: string[] = [];
+    for (let i = 0; i < activePoints.length; i++) {
+      let ptCol = activeColor;
+      const seg = segmentsMeta.find((s) => i >= s.startIndex && i <= s.endIndex);
+      if (seg && segmentColors[seg.index]) {
+        ptCol = segmentColors[seg.index];
+      } else if (pointColors[i]) {
+        ptCol = pointColors[i];
+      }
+      encodedPointColors.push(ptCol);
+    }
+
+    setPointColors(encodedPointColors);
+
+    const patternName = `Motif Encodé RGB (${presetName}) #${Date.now().toString().slice(-4)}`;
+    const saved = savePattern({
+      name: patternName,
+      description: `Motif avec chrominance RGB point par point et ${fillChannels.length} canaux encodés (${activePoints.length} points)`,
+      points: activePoints,
+      pointColors: encodedPointColors,
+      segmentColors,
+      fillChannels,
+      colorEncoding: 'laser_chroma',
+      handMode,
+      sourceModule: 'OSCILLOSCOPE',
+      color: activeColor,
+      isFavorite: true,
+    });
+
+    if (onSettingsChange) {
+      onSettingsChange({
+        pointColors: encodedPointColors,
+        segmentColors,
+        fillChannels,
+        primaryColor: activeColor,
+        colorScheme: 'custom',
+      });
+    }
+
+    setCustomPatternCreatedMsg(`Couleurs encodées avec succès dans le motif "${patternName}" !`);
+    setTimeout(() => setCustomPatternCreatedMsg(null), 4500);
+
+    if (onSavedToPatternLibrary) {
+      onSavedToPatternLibrary(patternName);
+    }
+  };
+
+  // Preset Gradient Color Sweeps (Arc-en-Ciel, Cyberpunk, Lapin & Terrier Nature)
+  const handleApplyGradientSweep = (type: 'rabbit_burrow' | 'rainbow' | 'sunset' | 'cyberpunk') => {
+    const N = activePoints.length;
+    if (N === 0) return;
+    const newPtColors: string[] = [];
+    const newSegColors: Record<number, string> = {};
+
+    if (type === 'rabbit_burrow') {
+      // Rabbit: White body (#ffffff), Pink ears (#ffb3c6), Red eyes (#ef4444), Burrow: Brown (#8b4513)
+      segmentsMeta.forEach((seg, sIdx) => {
+        if (sIdx === 0) newSegColors[seg.index] = '#8b4513'; // Burrow
+        else if (sIdx === 1) newSegColors[seg.index] = '#ffffff'; // Rabbit body
+        else if (sIdx === 2) newSegColors[seg.index] = '#ffb3c6'; // Ears
+        else newSegColors[seg.index] = '#ffffff';
+      });
+      for (let i = 0; i < N; i++) {
+        const seg = segmentsMeta.find((s) => i >= s.startIndex && i <= s.endIndex);
+        if (seg && newSegColors[seg.index]) {
+          newPtColors.push(newSegColors[seg.index]);
+        } else if (i < N * 0.3) {
+          newPtColors.push('#8b4513');
+        } else if (i < N * 0.7) {
+          newPtColors.push('#ffffff');
+        } else {
+          newPtColors.push('#ffb3c6');
+        }
+      }
+    } else if (type === 'rainbow') {
+      for (let i = 0; i < N; i++) {
+        const hue = Math.round((i / N) * 360);
+        newPtColors.push(`hsl(${hue}, 100%, 60%)`);
+      }
+    } else if (type === 'sunset') {
+      for (let i = 0; i < N; i++) {
+        const t = i / N;
+        // Orange to Magenta to Purple
+        const r = 255;
+        const g = Math.round(180 * (1 - t));
+        const b = Math.round(220 * t);
+        newPtColors.push(`rgb(${r}, ${g}, ${b})`);
+      }
+    } else if (type === 'cyberpunk') {
+      for (let i = 0; i < N; i++) {
+        newPtColors.push(i % 2 === 0 ? '#00f5d4' : '#ec4899');
+      }
+    }
+
+    setPointColors(newPtColors);
+    setSegmentColors(newSegColors);
+    if (onSettingsChange) {
+      onSettingsChange({
+        pointColors: newPtColors,
+        segmentColors: newSegColors,
+        colorScheme: 'custom',
+      });
+    }
+  };
+
   // Delete the selected line and generate a clean pattern in the library!
   const handleDeleteSelectedSegment = () => {
     if (selectedSegmentIdx === null) return;
@@ -826,12 +1131,114 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
   };
 
   return (
-    <div
-      ref={containerRef}
-      className={`relative flex flex-col items-center justify-center bg-[#070e1c] rounded-2xl border border-[#14233c] p-3 shadow-2xl overflow-hidden font-mono ${
-        isFullscreen ? 'fixed inset-0 z-50 rounded-none bg-[#050b14]' : 'h-full min-h-[480px]'
-      }`}
-    >
+    <>
+      {/* 1. Docking Base Placeholder when scope is detached */}
+      {isDetachedEffective && (
+        <div
+          ref={containerRef}
+          className="w-full bg-gradient-to-br from-[#060e1c] via-[#09162e] to-[#060e1c] border-2 border-dashed border-teal-500/50 rounded-2xl p-6 text-center space-y-4 shadow-xl font-mono text-xs text-slate-300 relative overflow-hidden"
+        >
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-4 text-center sm:text-left">
+            <div className="w-14 h-14 rounded-2xl bg-teal-500/20 border-2 border-teal-400/50 flex items-center justify-center text-teal-300 shadow-lg shrink-0">
+              <ExternalLink className="w-7 h-7 animate-pulse" />
+            </div>
+            <div>
+              <div className="flex items-center justify-center sm:justify-start gap-2">
+                <span className="text-sm font-black text-teal-300 uppercase tracking-wider">
+                  OSCILLOSCOPE DÉTACHÉ DE SON SOCLE
+                </span>
+                <span className="px-2 py-0.5 bg-amber-400 text-slate-950 font-black text-[9px] rounded-full">
+                  HUD FLOTTANT ACTIF
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1 max-w-xl">
+                L'écran d'oscilloscope flotte librement au-dessus de vos panneaux. Déplacez-le à la souris et parcourez la bibliothèque pour tester ou spammer tous les motifs en direct !
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+            <button
+              type="button"
+              onClick={toggleDetach}
+              className="px-4 py-2 bg-teal-500 hover:bg-teal-400 active:scale-95 text-slate-950 font-black text-xs rounded-xl shadow-lg shadow-teal-500/30 flex items-center gap-2 transition-all hover:scale-105 cursor-pointer"
+            >
+              <Pin className="w-4 h-4" />
+              <span>RACCROCHER L'OSCILLOSCOPE AU SOCLE</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 2. The Oscilloscope (Docked in page, or Detached Floating HUD) */}
+      <div
+        ref={!isDetachedEffective ? containerRef : undefined}
+        style={
+          isDetachedEffective
+            ? {
+                position: 'fixed',
+                left: `${floatingPos.x}px`,
+                top: `${floatingPos.y}px`,
+                width: `${detachedSize}px`,
+                zIndex: 99999,
+              }
+            : undefined
+        }
+        className={`relative flex flex-col items-center justify-between bg-[#060c18] font-mono transition-all ${
+          isDetachedEffective
+            ? 'rounded-2xl border-2 border-teal-400/80 shadow-[0_20px_60px_rgba(0,0,0,0.9),0_0_40px_rgba(0,245,212,0.25)] backdrop-blur-xl p-4 select-none'
+            : isFullscreen
+            ? 'fixed inset-0 z-50 rounded-none bg-[#040810] border border-[#14233c] p-4 md:p-6 shadow-2xl overflow-hidden'
+            : 'rounded-3xl border border-[#142646] p-4 md:p-6 shadow-2xl overflow-hidden w-full min-h-[640px] md:min-h-[720px] lg:min-h-[760px]'
+        }`}
+      >
+        {/* Floating Header Bar for Dragging and Quick Resize */}
+        {isDetachedEffective && (
+          <div
+            onPointerDown={handleStartFloatingDrag}
+            className="w-full flex items-center justify-between px-3 py-1.5 mb-2 rounded-xl bg-gradient-to-r from-[#0a1830] via-[#0f244a] to-[#0a1830] border border-teal-500/40 cursor-grab active:cursor-grabbing text-[11px]"
+          >
+            <div className="flex items-center gap-2 text-teal-300 font-black">
+              <GripHorizontal className="w-4 h-4 text-teal-400" />
+              <span className="uppercase tracking-wider">🛰️ SCOPE FLOTTANT (DÉTACHÉ)</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1 bg-[#060e1c] px-1.5 py-0.5 rounded border border-[#142646]">
+                {[
+                  { label: 'S', size: 320 },
+                  { label: 'M', size: 420 },
+                  { label: 'L', size: 560 },
+                ].map((s) => (
+                  <button
+                    key={s.size}
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDetachedSize(s.size);
+                    }}
+                    className={`px-1.5 py-0.2 rounded font-black text-[9px] transition-all ${
+                      detachedSize === s.size ? 'bg-teal-400 text-slate-950' : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleDetach();
+                }}
+                title="Raccrocher sur le socle"
+                className="px-2 py-0.5 bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-[9px] rounded flex items-center gap-1 shadow-sm"
+              >
+                <Pin className="w-3 h-3" />
+                <span>SOCLE</span>
+              </button>
+            </div>
+          </div>
+        )}
       {/* Top Overlay Badge & Telemetry */}
       <div className="absolute top-3 left-4 right-4 flex items-center justify-between pointer-events-none z-10">
         <div className="flex items-center gap-2 bg-[#050b14]/90 backdrop-blur-md px-3 py-1 rounded-lg border border-[#162744] text-[11px] pointer-events-auto">
@@ -865,7 +1272,7 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
             <span>{isPaused ? 'REPRENDRE' : 'PAUSE TRACÉ'}</span>
           </button>
 
-          {/* USER SPECIFIED: Pause Tools: Lignes & Couleurs vs Remplir Vides */}
+          {/* Pause Tools: Line deletion, Nudge & Noise Fill */}
           {isPaused && (
             <>
               <div className="h-4 w-px bg-slate-700 mx-1" />
@@ -879,43 +1286,48 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
                     ? 'bg-rose-500 text-slate-950 border-rose-300 shadow-sm'
                     : 'bg-[#101e36] text-slate-300 border-[#1c3358] hover:text-white'
                 }`}
-                title="Inspecter et colorer des lignes ou supprimer des segments"
+                title="Inspecter et supprimer des segments indésirables"
               >
                 <Scissors className="w-3 h-3" />
-                <span>LIGNES & COULEURS</span>
+                <span>INSPECTER LIGNES</span>
               </button>
 
               <button
                 onClick={() => {
-                  setPauseToolMode('fill');
-                  setSelectedSegmentIdx(null);
+                  const next = !settings.noiseFillEnabled;
+                  onSettingsChange({ noiseFillEnabled: next });
                 }}
                 className={`px-2 py-1 rounded text-[10px] font-bold flex items-center gap-1 transition-all border ${
-                  pauseToolMode === 'fill'
-                    ? 'bg-amber-500 text-slate-950 border-amber-300 shadow-sm'
-                    : 'bg-[#101e36] text-slate-300 border-[#1c3358] hover:text-white'
-                }`}
-                title="Cliquer dans un vide pour le remplir de couleur et ajouter un canal"
-              >
-                <Droplet className="w-3 h-3" />
-                <span>REMPLIR VIDES & CANAUX</span>
-              </button>
-
-              <button
-                onClick={() => setShowChannelsDrawer(!showChannelsDrawer)}
-                className={`px-2 py-1 rounded text-[10px] font-bold flex items-center gap-1 transition-all border ${
-                  showChannelsDrawer || fillChannels.length > 0
-                    ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/60'
+                  settings.noiseFillEnabled
+                    ? 'bg-gradient-to-r from-cyan-500 to-teal-400 text-slate-950 border-cyan-300 shadow-sm'
                     : 'bg-[#101e36] text-slate-400 border-[#1c3358]'
                 }`}
-                title="Gérer les canaux de couleur et de remplissage"
+                title="Activer ou désactiver le bruit blanc résonnant intérieur rebondissant sur le contour"
               >
-                <Layers className="w-3 h-3 text-cyan-400" />
-                <span>CANAUX ({fillChannels.length})</span>
+                <Radio className="w-3 h-3" />
+                <span>BRUIT BLANC {settings.noiseFillEnabled ? 'ON' : 'OFF'}</span>
               </button>
             </>
           )}
 
+          <button
+            onClick={toggleDetach}
+            className={`p-1.5 rounded transition-all text-xs flex items-center gap-1 font-bold ${
+              isDetachedEffective
+                ? 'bg-amber-400 text-slate-950 shadow-md shadow-amber-400/30'
+                : 'text-teal-300 hover:bg-[#122038] hover:text-white'
+            }`}
+            title={
+              isDetachedEffective
+                ? "Raccrocher l'oscilloscope sur son socle"
+                : "Détacher l'oscilloscope en fenêtre flottante (PiP) pour tester les motifs"
+            }
+          >
+            {isDetachedEffective ? <Pin className="w-3.5 h-3.5 fill-current" /> : <ExternalLink className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline text-[10px]">
+              {isDetachedEffective ? 'RACCROCHER' : 'DÉTACHER'}
+            </span>
+          </button>
           <button
             onClick={() => setShowControls(!showControls)}
             className={`p-1.5 rounded transition-colors text-xs ${
@@ -942,93 +1354,144 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
         </div>
       </div>
 
-      {/* Main Square CRT Screen with Lab Bezel */}
-      <div className="relative p-2 rounded-2xl bg-[#040810] border-2 border-[#162a4a] shadow-[inset_0_0_40px_rgba(0,0,0,0.9)] flex items-center justify-center">
-        <canvas
-          ref={canvasRef}
-          width={canvasDimensions.width}
-          height={canvasDimensions.height}
-          onMouseMove={handleCanvasMouseMove}
-          onClick={handleCanvasClick}
-          className={`rounded-xl block transition-all ${
-            isPaused
-              ? pauseToolMode === 'fill'
-                ? 'cursor-crosshair'
-                : 'cursor-pointer'
-              : 'cursor-crosshair'
-          }`}
-        />
+      {/* Main Spacious Square CRT Screen */}
+      <div className="w-full flex flex-col items-center justify-center gap-3 my-auto py-2">
+        <div
+          ref={screenContainerRef}
+          className="relative w-full max-w-[660px] aspect-square p-3 md:p-5 rounded-3xl bg-[#03060c] border-2 border-[#162a4a] shadow-[inset_0_0_60px_rgba(0,0,0,0.95),0_15px_40px_rgba(0,0,0,0.85)] flex items-center justify-center mx-auto transition-all"
+        >
+          <canvas
+            ref={canvasRef}
+            width={canvasDimensions.width}
+            height={canvasDimensions.height}
+            onMouseMove={handleCanvasMouseMove}
+            onClick={handleCanvasClick}
+            className={`rounded-2xl block w-full h-full object-contain transition-all ${
+              isPaused ? 'cursor-pointer' : 'cursor-crosshair'
+            }`}
+          />
 
-        {/* Phosphor CRT Bezel Glow Accent */}
-        <div className="absolute inset-0 rounded-2xl pointer-events-none border border-cyan-500/10 shadow-[0_0_20px_rgba(0,245,212,0.05)]" />
-      </div>
+          {/* Phosphor CRT Bezel Glow Accent */}
+          <div className="absolute inset-0 rounded-3xl pointer-events-none border border-cyan-500/15 shadow-[0_0_30px_rgba(0,245,212,0.06)]" />
+        </div>
 
-      {/* USER SPECIFIED: Void Fill Sub-Bar when paused in 'fill' mode */}
-      {isPaused && pauseToolMode === 'fill' && (
-        <div className="absolute top-14 left-4 right-4 bg-[#071124]/95 border border-amber-500/50 p-2.5 rounded-xl shadow-2xl z-20 flex flex-wrap items-center justify-between gap-3 text-xs backdrop-blur-md">
-          <div className="flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping" />
-            <span className="font-black text-amber-300 text-xs">OUTIL REMPLISSAGE DU VIDE :</span>
-            <span className="text-[11px] text-slate-300">
-              Cliquez dans un espace vide fermé entre les lignes du motif pour le colorer et créer automatiquement un nouveau canal.
-            </span>
-          </div>
+        {/* USER SPECIFIED: Bruit Blanc Intérieur Rebondissant Ribbon & Frequency Controller */}
+        <div className="w-full max-w-[660px] bg-[#050d1c]/95 border border-[#142646] p-3 rounded-2xl shadow-xl flex flex-col gap-2.5 text-xs backdrop-blur-md">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#13243f] pb-2">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !settings.noiseFillEnabled;
+                  onSettingsChange({ noiseFillEnabled: next });
+                }}
+                className={`px-2.5 py-1 rounded-lg text-[10px] font-black border transition-all flex items-center gap-1.5 ${
+                  settings.noiseFillEnabled
+                    ? 'bg-gradient-to-r from-teal-400 to-cyan-400 text-slate-950 border-cyan-300 shadow-md shadow-cyan-500/20'
+                    : 'bg-[#09152a] text-slate-400 border-[#142646]'
+                }`}
+              >
+                <Radio className="w-3.5 h-3.5" />
+                <span>BRUIT BLANC INTÉRIEUR : {settings.noiseFillEnabled ? 'ACTIF' : 'INACTIF'}</span>
+              </button>
 
-          <div className="flex items-center gap-3">
-            {/* Color circles */}
-            <div className="flex items-center gap-1 bg-[#040810] px-2 py-1 rounded-lg border border-[#162744]">
-              {COLOR_PALETTE.slice(0, 8).map((col) => (
-                <button
-                  key={col.hex}
-                  onClick={() => setActiveColor(col.hex)}
-                  style={{ backgroundColor: col.hex }}
-                  className={`w-4 h-4 rounded-full transition-transform ${
-                    activeColor === col.hex ? 'scale-125 ring-2 ring-white shadow-md' : 'opacity-80 hover:opacity-100'
-                  }`}
-                  title={col.label}
-                />
-              ))}
-              <input
-                type="color"
-                value={activeColor}
-                onChange={(e) => setActiveColor(e.target.value)}
-                className="w-5 h-5 bg-transparent border-0 cursor-pointer ml-1"
-                title="Couleur personnalisée"
-              />
+              <span className="text-[11px] text-slate-400 hidden sm:inline">
+                Rebondit strictement à l'intérieur du motif calculé
+              </span>
             </div>
 
-            {/* Fill Style */}
-            <div className="flex items-center gap-1 bg-[#040810] p-1 rounded-lg border border-[#162744]">
-              {(['solid', 'crt_hatch', 'neon_glow'] as const).map((st) => (
+            {/* Quick Frequency Presets */}
+            <div className="flex items-center gap-1 bg-[#030812] p-1 rounded-xl border border-[#142646]">
+              {[
+                { label: '250 Hz', hz: 250 },
+                { label: '1 kHz', hz: 1000 },
+                { label: '4.4 kHz', hz: 4400 },
+                { label: '10 kHz', hz: 10000 },
+                { label: '18 kHz', hz: 18000 },
+              ].map((pst) => (
                 <button
-                  key={st}
-                  onClick={() => setFillStyle(st)}
-                  className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase transition-all ${
-                    fillStyle === st ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-slate-200'
+                  key={pst.hz}
+                  type="button"
+                  onClick={() => onSettingsChange({ noiseFrequency: pst.hz })}
+                  className={`px-2 py-0.5 rounded-lg text-[9px] font-black transition-all ${
+                    (settings.noiseFrequency || 4400) === pst.hz
+                      ? 'bg-cyan-500 text-slate-950 font-bold'
+                      : 'bg-[#09162c] text-slate-300 hover:text-white'
                   }`}
                 >
-                  {st === 'solid' ? 'Plein' : st === 'crt_hatch' ? 'Trame CRT' : 'Halo Néon'}
+                  {pst.label}
                 </button>
               ))}
             </div>
+          </div>
 
-            {/* Opacity */}
-            <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
-              <span>OPACITÉ :</span>
+          {/* Sliders for Frequency, Density, Bounce Speed & Physics */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-0.5">
+            {/* Frequency Slider */}
+            <div className="flex flex-col gap-1 bg-[#030812] p-2 rounded-xl border border-[#142646]">
+              <div className="flex justify-between items-center text-[10px]">
+                <span className="text-slate-400 font-bold uppercase flex items-center gap-1">
+                  <Volume2 className="w-3 h-3 text-cyan-400" /> Fréquence :
+                </span>
+                <span className="text-cyan-300 font-black font-mono">
+                  {(settings.noiseFrequency || 4400).toLocaleString()} Hz
+                </span>
+              </div>
               <input
                 type="range"
-                min="0.1"
-                max="1.0"
-                step="0.05"
-                value={fillOpacity}
-                onChange={(e) => setFillOpacity(parseFloat(e.target.value))}
-                className="w-16 accent-amber-400"
+                min="100"
+                max="20000"
+                step="50"
+                value={settings.noiseFrequency || 4400}
+                onChange={(e) => onSettingsChange({ noiseFrequency: parseInt(e.target.value) })}
+                className="w-full accent-cyan-400 h-1.5 bg-[#09152a] rounded-lg"
               />
-              <span className="text-amber-300 font-bold w-7">{(fillOpacity * 100).toFixed(0)}%</span>
+            </div>
+
+            {/* Density & Sparkles */}
+            <div className="flex flex-col gap-1 bg-[#030812] p-2 rounded-xl border border-[#142646]">
+              <div className="flex justify-between items-center text-[10px]">
+                <span className="text-slate-400 font-bold uppercase flex items-center gap-1">
+                  <Activity className="w-3 h-3 text-teal-400" /> Densité :
+                </span>
+                <span className="text-teal-300 font-black font-mono">
+                  {settings.noiseDensity || 260} pts
+                </span>
+              </div>
+              <input
+                type="range"
+                min="40"
+                max="1000"
+                step="20"
+                value={settings.noiseDensity || 260}
+                onChange={(e) => onSettingsChange({ noiseDensity: parseInt(e.target.value) })}
+                className="w-full accent-teal-400 h-1.5 bg-[#09152a] rounded-lg"
+              />
+            </div>
+
+            {/* Bounce Speed & Rebound Mode */}
+            <div className="flex flex-col gap-1 bg-[#030812] p-2 rounded-xl border border-[#142646]">
+              <div className="flex justify-between items-center text-[10px]">
+                <span className="text-slate-400 font-bold uppercase flex items-center gap-1">
+                  <Zap className="w-3 h-3 text-amber-400" /> Vitesse Rebond :
+                </span>
+                <span className="text-amber-300 font-black font-mono">
+                  {(settings.noiseBounceSpeed || 1.2).toFixed(1)}x
+                </span>
+              </div>
+              <input
+                type="range"
+                min="0.2"
+                max="4.0"
+                step="0.1"
+                value={settings.noiseBounceSpeed || 1.2}
+                onChange={(e) => onSettingsChange({ noiseBounceSpeed: parseFloat(e.target.value) })}
+                className="w-full accent-amber-400 h-1.5 bg-[#09152a] rounded-lg"
+              />
             </div>
           </div>
         </div>
-      )}
+      </div>
 
       {/* Notification Toast */}
       {customPatternCreatedMsg && (
@@ -1038,7 +1501,7 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
         </div>
       )}
 
-      {/* USER SPECIFIED: Line Inspection & Coloration Floating Action Bar */}
+      {/* Line Inspection & Deletion Floating Action Bar */}
       {isPaused && selectedSegmentIdx !== null && (
         <div className="absolute bottom-6 left-4 right-4 bg-[#091325]/95 border border-rose-500/60 p-3.5 rounded-2xl shadow-2xl z-30 flex flex-wrap items-center justify-between gap-4 text-xs font-mono backdrop-blur-md">
           <div className="space-y-1">
@@ -1051,39 +1514,7 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
             </div>
           </div>
 
-          {/* Color Palette for this line */}
-          <div className="flex items-center gap-2 bg-[#040810] px-3 py-1.5 rounded-xl border border-rose-500/40">
-            <span className="text-[10px] text-slate-400 font-bold uppercase flex items-center gap-1">
-              <Palette className="w-3.5 h-3.5 text-rose-400" /> COULEUR LIGNE :
-            </span>
-            <div className="flex items-center gap-1">
-              {COLOR_PALETTE.map((col) => (
-                <button
-                  key={col.hex}
-                  onClick={() => handleApplyColorToSegment(col.hex)}
-                  style={{ backgroundColor: col.hex }}
-                  className="w-4 h-4 rounded-full transition-transform hover:scale-125 border border-slate-900 shadow-sm"
-                  title={col.label}
-                />
-              ))}
-              <input
-                type="color"
-                value={activeColor}
-                onChange={(e) => handleApplyColorToSegment(e.target.value)}
-                className="w-5 h-5 bg-transparent border-0 cursor-pointer ml-1"
-                title="Couleur personnalisée"
-              />
-            </div>
-            <button
-              onClick={() => handleApplyColorToAll(activeColor)}
-              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-amber-300 font-bold border border-slate-600"
-            >
-              À tout le motif
-            </button>
-          </div>
-
           <div className="flex items-center gap-2">
-            {/* USER SPECIFIED: "en cliquant dessus, ça nous amène à l'endroit dont l'ozoué est généré" */}
             {onNavigateToSource && (
               <button
                 onClick={() => onNavigateToSource(sourceModuleInfo.mode)}
@@ -1094,7 +1525,6 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
               </button>
             )}
 
-            {/* USER SPECIFIED: "si j'ai une ligne supplémentaire que je ne veux pas, et bien je suis capable de l'enlever. Et si je l'enlève, ça va me donner un fichier supplémentaire comme quoi j'ai un motif en préparation" */}
             <button
               onClick={handleDeleteSelectedSegment}
               className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center gap-1.5 transition-all shadow-md shadow-rose-600/30"
@@ -1109,144 +1539,6 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
             >
               Fermer
             </button>
-          </div>
-        </div>
-      )}
-
-      {/* USER SPECIFIED: Channels Drawer for managing multiple fill and color channels */}
-      {showChannelsDrawer && (
-        <div className="absolute top-14 right-4 w-96 bg-[#070e1c]/98 border-2 border-cyan-500/60 rounded-2xl shadow-2xl p-4 z-30 space-y-3 backdrop-blur-xl max-h-[80vh] overflow-y-auto">
-          <div className="flex items-center justify-between border-b border-[#14233c] pb-2.5">
-            <div className="flex items-center gap-2">
-              <Layers className="w-4 h-4 text-cyan-400" />
-              <span className="font-black text-xs text-cyan-300 tracking-wider uppercase">
-                CANAUX DE REMPLISSAGE ({fillChannels.length})
-              </span>
-            </div>
-            <button
-              onClick={() => setShowChannelsDrawer(false)}
-              className="text-slate-400 hover:text-white text-xs px-2 py-0.5 rounded bg-[#101b2f]"
-            >
-              ✕
-            </button>
-          </div>
-
-          <p className="text-[10px] text-slate-400">
-            Chaque vide rempli génère automatiquement un canal indépendant avec son style et sa couleur.
-          </p>
-
-          {fillChannels.length === 0 ? (
-            <div className="p-4 rounded-xl bg-[#040810] border border-dashed border-[#1c3050] text-center text-slate-500 text-[11px]">
-              Aucun canal de remplissage actif. Cliquez sur "REMPLIR VIDES & CANAUX" puis touchez un espace vide du motif.
-            </div>
-          ) : (
-            <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
-              {fillChannels.map((chan, idx) => (
-                <div
-                  key={chan.id}
-                  className="bg-[#0b162a] border border-[#1c3358] rounded-xl p-2.5 space-y-2 text-xs"
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={chan.enabled}
-                        onChange={(e) => {
-                          const val = e.target.checked;
-                          setFillChannels((prev) =>
-                            prev.map((c) => (c.id === chan.id ? { ...c, enabled: val } : c))
-                          );
-                        }}
-                        className="accent-cyan-400 cursor-pointer"
-                      />
-                      <span className="font-bold text-slate-200">{chan.name}</span>
-                    </div>
-
-                    <button
-                      onClick={() => {
-                        channelMasksRef.current.delete(chan.id);
-                        setFillChannels((prev) => prev.filter((c) => c.id !== chan.id));
-                      }}
-                      className="p-1 rounded text-rose-400 hover:bg-rose-950/50 hover:text-rose-300"
-                      title="Supprimer ce canal"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-
-                  <div className="flex items-center justify-between gap-2 pt-1 border-t border-[#14233c]/60">
-                    <div className="flex items-center gap-1.5">
-                      <input
-                        type="color"
-                        value={chan.color}
-                        onChange={(e) => {
-                          const col = e.target.value;
-                          setFillChannels((prev) =>
-                            prev.map((c) => (c.id === chan.id ? { ...c, color: col } : c))
-                          );
-                        }}
-                        className="w-5 h-5 bg-transparent border-0 cursor-pointer rounded"
-                      />
-                      <select
-                        value={chan.style}
-                        onChange={(e) => {
-                          const st = e.target.value as PatternFillChannel['style'];
-                          setFillChannels((prev) =>
-                            prev.map((c) => (c.id === chan.id ? { ...c, style: st } : c))
-                          );
-                        }}
-                        className="bg-[#050b16] border border-[#1c3050] text-[10px] text-amber-300 rounded px-1.5 py-0.5"
-                      >
-                        <option value="solid">Plein</option>
-                        <option value="crt_hatch">Trame CRT</option>
-                        <option value="neon_glow">Halo Néon</option>
-                      </select>
-                    </div>
-
-                    <div className="flex items-center gap-1 text-[10px] text-slate-400">
-                      <span>{(chan.opacity * 100).toFixed(0)}%</span>
-                      <input
-                        type="range"
-                        min="0.05"
-                        max="1.0"
-                        step="0.05"
-                        value={chan.opacity}
-                        onChange={(e) => {
-                          const op = parseFloat(e.target.value);
-                          setFillChannels((prev) =>
-                            prev.map((c) => (c.id === chan.id ? { ...c, opacity: op } : c))
-                          );
-                        }}
-                        className="w-14 accent-cyan-400"
-                      />
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Drawer Actions */}
-          <div className="pt-2 border-t border-[#14233c] space-y-2">
-            <button
-              onClick={handleSaveColoredPattern}
-              className="w-full py-2 bg-gradient-to-r from-cyan-500 via-indigo-500 to-amber-500 hover:opacity-95 text-slate-950 font-black text-xs rounded-xl shadow-lg flex items-center justify-center gap-2 transition-all"
-            >
-              <Sparkles className="w-4 h-4 fill-current" />
-              <span>SAUVEGARDER LE MOTIF MULTICOLORE</span>
-            </button>
-
-            {fillChannels.length > 0 && (
-              <button
-                onClick={() => {
-                  channelMasksRef.current.clear();
-                  setFillChannels([]);
-                }}
-                className="w-full py-1 text-slate-400 hover:text-rose-400 text-[10px] font-bold text-center"
-              >
-                Vider tous les canaux de remplissage
-              </button>
-            )}
           </div>
         </div>
       )}
@@ -1306,6 +1598,7 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
                   { id: 'white_phosphor', label: 'Blanc P4' },
                   { id: 'blue_phosphor', label: 'Bleu P11' },
                   { id: 'gold_phosphor', label: 'Or Lotus' },
+                  { id: 'earthy_phosphor', label: 'Terre & Blanc' },
                 ].map((c) => (
                   <button
                     key={c.id}
@@ -1393,8 +1686,106 @@ export const ZoneCOscilloscope: React.FC<ZoneCOscilloscopeProps> = ({
               </div>
             </div>
           </div>
+
+          {/* Les 4 canaux de remplissage dashboard section */}
+          <div className="border-t border-[#1c335a] pt-3 mt-2 space-y-2">
+            <span className="text-[10px] text-cyan-300 block font-bold uppercase tracking-wider">
+              CONTRÔLE DES CANAUX DE REMPLISSAGE (MAX 4 CANAUX)
+            </span>
+            {fillChannels.length === 0 ? (
+              <div className="text-[10px] text-slate-500 italic bg-[#050b15]/60 p-2 rounded border border-[#101f35]">
+                Aucun canal de remplissage actif. Mettez l'oscilloscope en PAUSE, activez l'outil "Remplissage", puis cliquez à l'intérieur d'un motif fermé pour injecter une zone de couleur.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2">
+                {fillChannels.slice(0, 4).map((chan, idx) => (
+                  <div key={chan.id} className="bg-[#050d1a] border border-[#14233c] p-2 rounded-lg flex flex-col gap-1.5 shadow-md">
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono text-[10px] font-bold text-slate-300 truncate flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 rounded-full inline-block border border-slate-900 shadow-inner" style={{ backgroundColor: chan.color || '#8b4513' }} />
+                        Canal #{idx + 1}
+                      </span>
+                      <button
+                        onClick={() => {
+                          const updated = fillChannels.filter((_, cIdx) => cIdx !== idx);
+                          setFillChannels(updated);
+                          if (onSettingsChange) {
+                            onSettingsChange({ fillChannels: updated });
+                          }
+                        }}
+                        className="text-rose-400 hover:text-rose-300 text-xs font-bold transition-colors px-1"
+                      >
+                        ✕
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-1.5 text-[9px] text-slate-400 mt-1">
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="checkbox"
+                          id={`chan-toggle-${chan.id}`}
+                          checked={chan.enabled}
+                          onChange={(e) => {
+                            const updated = [...fillChannels];
+                            updated[idx] = { ...chan, enabled: e.target.checked };
+                            setFillChannels(updated);
+                            if (onSettingsChange) {
+                              onSettingsChange({ fillChannels: updated });
+                            }
+                          }}
+                          className="w-3 h-3 rounded bg-slate-800 border-slate-700 text-cyan-500 focus:ring-0 cursor-pointer"
+                        />
+                        <label htmlFor={`chan-toggle-${chan.id}`} className="cursor-pointer select-none">ACTIVER</label>
+                      </div>
+
+                      <div className="flex items-center gap-1 justify-end">
+                        <input
+                          type="color"
+                          value={chan.color}
+                          onChange={(e) => {
+                            const updated = [...fillChannels];
+                            updated[idx] = { ...chan, color: e.target.value };
+                            setFillChannels(updated);
+                            if (onSettingsChange) {
+                              onSettingsChange({ fillChannels: updated });
+                            }
+                          }}
+                          className="w-5 h-4 bg-transparent border-0 cursor-pointer outline-none rounded"
+                        />
+                        <span>TEINTE</span>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1 mt-1 text-[9px] text-slate-500">
+                      <div className="flex justify-between">
+                        <span>OPACITÉ</span>
+                        <span>{((chan.opacity ?? 0.6) * 100).toFixed(0)}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0.1"
+                        max="1.0"
+                        step="0.05"
+                        value={chan.opacity ?? 0.6}
+                        onChange={(e) => {
+                          const updated = [...fillChannels];
+                          updated[idx] = { ...chan, opacity: parseFloat(e.target.value) };
+                          setFillChannels(updated);
+                          if (onSettingsChange) {
+                            onSettingsChange({ fillChannels: updated });
+                          }
+                        }}
+                        className="w-full h-1 accent-cyan-400 bg-slate-800 rounded cursor-pointer"
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
+    </>
   );
 };

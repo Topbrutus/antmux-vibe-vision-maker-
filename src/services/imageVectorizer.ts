@@ -78,12 +78,49 @@ export function vectorizeImageData(
   const data = imgData.data;
 
   // 1. Grayscale buffer
-  const gray = new Float32Array(width * height);
+  let gray = new Float32Array(width * height);
   for (let i = 0; i < data.length; i += 4) {
     const r = data[i];
     const g = data[i + 1];
     const b = data[i + 2];
-    gray[i / 4] = 0.299 * r + 0.587 * g + 0.114 * b;
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    gray[i / 4] = config.invert ? 255 - lum : lum;
+  }
+
+  // 1b. Fast Box Blur for noise suppression
+  if (config.blurRadius > 0) {
+    const r = Math.min(3, Math.max(1, config.blurRadius));
+    const temp = new Float32Array(width * height);
+    // Horizontal blur
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let sum = 0;
+        let count = 0;
+        for (let dx = -r; dx <= r; dx++) {
+          const nx = x + dx;
+          if (nx >= 0 && nx < width) {
+            sum += gray[y * width + nx];
+            count++;
+          }
+        }
+        temp[y * width + x] = sum / count;
+      }
+    }
+    // Vertical blur
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let sum = 0;
+        let count = 0;
+        for (let dy = -r; dy <= r; dy++) {
+          const ny = y + dy;
+          if (ny >= 0 && ny < height) {
+            sum += temp[ny * width + x];
+            count++;
+          }
+        }
+        gray[y * width + x] = sum / count;
+      }
+    }
   }
 
   // 2. Sobel Edge Detection
@@ -106,9 +143,7 @@ export function vectorizeImageData(
         gray[idx + width - 1] + 2 * gray[idx + width] + gray[idx + width + 1];
 
       const mag = Math.hypot(gx, gy);
-      const isEdge = config.invert ? mag < sobelThreshold : mag > sobelThreshold;
-
-      if (isEdge) {
+      if (mag > sobelThreshold) {
         edgePixels.push([x, y]);
       }
     }
@@ -129,7 +164,7 @@ export function vectorizeImageData(
     let nearestIdx = -1;
     let minDist = Infinity;
 
-    // Search nearest unvisited neighbor within a small radius
+    // Search nearest unvisited neighbor within a localized window
     const searchLimit = Math.min(edgePixels.length, currentIdx + 400);
     const searchStart = Math.max(0, currentIdx - 200);
 
@@ -140,16 +175,20 @@ export function vectorizeImageData(
       if (d < minDist) {
         minDist = d;
         nearestIdx = j;
-        if (d < 16) break; // early exit if close enough
+        if (d < 25) break; // early exit if adjacent pixel
       }
     }
 
     if (nearestIdx === -1) {
-      // Pick first unvisited
+      // Global search for nearest remaining point
       for (let j = 0; j < edgePixels.length; j++) {
         if (!visited[j]) {
-          nearestIdx = j;
-          break;
+          const [nx, ny] = edgePixels[j];
+          const d = (nx - cx) * (nx - cx) + (ny - cy) * (ny - cy);
+          if (d < minDist) {
+            minDist = d;
+            nearestIdx = j;
+          }
         }
       }
     }

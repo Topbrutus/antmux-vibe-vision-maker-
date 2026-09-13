@@ -15,7 +15,8 @@ import {
   evalWaveform,
   computeSegmentedSample,
   computeOctaSample,
-  createDefaultOctaSystem
+  createDefaultOctaSystem,
+  computeQuarterToneFreq
 } from './mathEngine';
 
 export class VectorAudioEngine {
@@ -34,12 +35,49 @@ export class VectorAudioEngine {
   private processorNode: ScriptProcessorNode | null = null;
 
   // Synthesis Mode (Defaulting to the powerful 8-generator Octa architecture)
-  private synthesisMode: 'octa' | 'standard' | 'segmented' | 'vector_path' | 'video_stereo' = 'octa';
+  private synthesisMode: 'octa' | 'standard' | 'segmented' | 'vector_path' | 'video_stereo' | 'dual_channel' = 'octa';
   private octaState: OctaSystemState = createDefaultOctaSystem();
   private segmentedX: SegmentedChannel | null = null;
   private segmentedY: SegmentedChannel | null = null;
   private customVectorPoints: Array<[number, number]> = [];
+  private customVectorColors: string[] = [];
   private vectorRefreshHz: number = 60;
+
+  private getColorBrightness(color: string | undefined): number {
+    if (!color) return 1.0;
+    const cleaned = color.trim().toLowerCase();
+    let r = 255, g = 255, b = 255;
+    if (cleaned.startsWith('#')) {
+      const hex = cleaned.substring(1);
+      if (hex.length === 3) {
+        r = parseInt(hex[0] + hex[0], 16);
+        g = parseInt(hex[1] + hex[1], 16);
+        b = parseInt(hex[2] + hex[2], 16);
+      } else if (hex.length === 6) {
+        r = parseInt(hex.substring(0, 2), 16);
+        g = parseInt(hex.substring(2, 4), 16);
+        b = parseInt(hex.substring(4, 6), 16);
+      }
+    } else if (cleaned.startsWith('rgb')) {
+      const match = cleaned.match(/rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+      if (match) {
+        r = parseInt(match[1], 10);
+        g = parseInt(match[2], 10);
+        b = parseInt(match[3], 10);
+      }
+    } else if (cleaned.startsWith('hsl')) {
+      const match = cleaned.match(/hsl\s*\(\s*(\d+)\s*,\s*(\d+)%\s*,\s*(\d+)%/);
+      if (match) {
+        return parseInt(match[3], 10) / 100;
+      }
+    } else {
+      if (cleaned === 'black') return 0.0;
+      if (cleaned === 'white') return 1.0;
+      if (cleaned === 'brown' || cleaned === '#8b4513') return 0.3;
+    }
+    const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    return Math.max(0.0, Math.min(1.0, luminance));
+  }
 
   // Video Stereo Resynthesis state
   private videoTrajectoryPoints: Array<[number, number]> = [];
@@ -84,6 +122,7 @@ export class VectorAudioEngine {
   private radioDelayNode: DelayNode | null = null;
   private radioFeedbackGain: GainNode | null = null;
   private radioScopeGainNode: GainNode | null = null;
+  private synthScopeGainNode: GainNode | null = null;
 
   // Dual Microphones Nodes & States
   private mic1Stream: MediaStream | null = null;
@@ -170,6 +209,52 @@ export class VectorAudioEngine {
   private recordedChunksRight: Float32Array[] = [];
   private recordingStartTime: number = 0;
 
+  // Relativistic and Gravity Time Dilation (CERN Confinement Engine)
+  public relativisticEnabled: boolean = false;
+  public speedOfLightLimit: number = 300; // units/sec, lower limit = more dilation
+  public gravitationalDilationDepth: number = 0.4; // radial gravitational factor
+  public properTimeElapsed: number = 0;
+  private prevValX: number = 0;
+  private prevValY: number = 0;
+
+  // Smoothing for plates deflection inertia (Anti-popcorn click reconstruction filter)
+  private smoothValX: number = 0;
+  private smoothValY: number = 0;
+
+  // Tab mix and pause/mute isolation states
+  private appMode: string = 'main';
+  private tabChannelsState: Record<string, { isPaused: boolean; isMuted: boolean }> = {};
+
+  // High-precision step-by-step FM phase accumulation for the 8 octa generators
+  private octaPhases: Record<GeneratorId, number> = {
+    L1: 0, L2: 0, L3: 0, L4: 0,
+    R1: 0, R2: 0, R3: 0, R4: 0
+  };
+
+  // Additive Piano Synthesizer State
+  private pianoState = {
+    active: false,
+    freqX: 432,
+    freqY: 432,
+    phaseX: 0,
+    phaseY: 0,
+    currentAmp: 0,
+    targetAmp: 0,
+    waveform: 'sine' as WaveformType
+  };
+
+  public triggerPianoNote(freqX: number, freqY: number, waveform: WaveformType) {
+    this.pianoState.freqX = freqX;
+    this.pianoState.freqY = freqY;
+    this.pianoState.waveform = waveform;
+    this.pianoState.targetAmp = 0.8;
+    this.pianoState.active = true;
+  }
+
+  public releasePianoNote() {
+    this.pianoState.targetAmp = 0;
+  }
+
   constructor(cfgX?: ChannelConfig, cfgY?: ChannelConfig) {
     this.configX = cfgX ? { ...cfgX } : {
       waveform: 'sine',
@@ -243,8 +328,12 @@ export class VectorAudioEngine {
       this.processorNode = this.ctx.createScriptProcessor(2048, 0, 2);
       this.processorNode.onaudioprocess = this.handleAudioProcess.bind(this);
 
-      // Routing: Processor -> Splitter (Analysers) & Limiter -> MasterGain -> Destination
-      this.processorNode.connect(this.splitterNode);
+      // Routing: Processor -> synthScopeGainNode -> Splitter (Analysers) & Limiter -> MasterGain -> Destination
+      this.synthScopeGainNode = this.ctx.createGain();
+      this.synthScopeGainNode.gain.setValueAtTime(this.feedSynthesizerToScope ? 1.0 : 0.0, this.ctx.currentTime);
+
+      this.processorNode.connect(this.synthScopeGainNode);
+      this.synthScopeGainNode.connect(this.splitterNode);
       this.processorNode.connect(this.limiterNode);
       this.limiterNode.connect(this.masterGainNode);
       this.masterGainNode.connect(this.ctx.destination);
@@ -317,14 +406,6 @@ export class VectorAudioEngine {
     return this.mediaStreamDest;
   }
 
-  public setSynthesisMode(mode: 'octa' | 'standard' | 'segmented' | 'vector_path' | 'video_stereo') {
-    this.synthesisMode = mode;
-  }
-
-  public getSynthesisMode(): 'octa' | 'standard' | 'segmented' | 'vector_path' | 'video_stereo' {
-    return this.synthesisMode;
-  }
-
   public setVideoStereoState(params: {
     points: Array<[number, number]>;
     audioBuffer?: AudioBuffer | null;
@@ -337,7 +418,14 @@ export class VectorAudioEngine {
     this.synthesisMode = 'video_stereo';
     if (params.points) this.videoTrajectoryPoints = params.points;
     if (params.audioBuffer !== undefined) this.videoAudioBuffer = params.audioBuffer;
-    if (params.playbackTime !== undefined) this.videoPlaybackTime = params.playbackTime;
+    if (params.playbackTime !== undefined) {
+      // If the difference is small (under 0.15s), don't snap the clock.
+      // This allows the high-precision audio thread to keep streaming continuously without clicks!
+      const diff = Math.abs(this.videoPlaybackTime - params.playbackTime);
+      if (diff > 0.15) {
+        this.videoPlaybackTime = params.playbackTime;
+      }
+    }
     if (params.playbackRate !== undefined) this.videoPlaybackRate = params.playbackRate;
     if (params.visualMix !== undefined) this.videoVisualMix = params.visualMix;
     if (params.audioModulation !== undefined) this.videoAudioModulation = params.audioModulation;
@@ -346,11 +434,21 @@ export class VectorAudioEngine {
 
   public updateVideoTrajectoryPoints(points: Array<[number, number]>, playbackTime?: number) {
     this.videoTrajectoryPoints = points;
-    if (playbackTime !== undefined) this.videoPlaybackTime = playbackTime;
+    if (playbackTime !== undefined) {
+      const diff = Math.abs(this.videoPlaybackTime - playbackTime);
+      if (diff > 0.15) {
+        this.videoPlaybackTime = playbackTime;
+      }
+    }
   }
 
   public setFeedToScope(source: 'synthesizer' | 'radio' | 'mic1' | 'mic2', active: boolean) {
-    if (source === 'synthesizer') this.feedSynthesizerToScope = active;
+    if (source === 'synthesizer') {
+      this.feedSynthesizerToScope = active;
+      if (this.synthScopeGainNode && this.ctx) {
+        this.synthScopeGainNode.gain.setValueAtTime(active ? 1.0 : 0.0, this.ctx.currentTime);
+      }
+    }
     if (source === 'radio') {
       this.feedRadioToScope = active;
       if (this.radioScopeGainNode && this.ctx) {
@@ -376,12 +474,52 @@ export class VectorAudioEngine {
     this.segmentedY = y;
   }
 
-  public setCustomVectorPath(points: Array<[number, number]>, refreshHz: number = 60) {
+  public setCustomVectorPath(points: Array<[number, number]>, refreshHz: number = 60, colors?: string[]) {
     this.customVectorPoints = points;
+    this.xyPoints = points;
     this.vectorRefreshHz = Math.max(10, Math.min(480, refreshHz));
+    this.synthesisMode = 'vector_path';
+    this.customVectorColors = colors || [];
+  }
+
+  public setAppMode(appMode: string) {
+    this.appMode = appMode;
+  }
+
+  public updateTabChannels(channels: Record<string, { isPaused: boolean; isMuted: boolean }>) {
+    this.tabChannelsState = channels;
+  }
+
+  public setSynthesisMode(mode: 'dual_channel' | 'segmented' | 'octa' | 'vector_path' | 'video_stereo') {
+    this.synthesisMode = mode;
+  }
+
+  public getSynthesisMode(): string {
+    return this.synthesisMode;
+  }
+
+  public getAudioContextState(): 'running' | 'suspended' | 'closed' | 'uninitialized' {
+    if (!this.ctx) return 'uninitialized';
+    return this.ctx.state;
+  }
+
+  public async toggleAudioState(): Promise<boolean> {
+    this.initAudio();
+    if (!this.ctx) return false;
+    if (this.ctx.state === 'suspended') {
+      await this.ctx.resume();
+      this.isRunning = true;
+      return true;
+    } else if (this.ctx.state === 'running') {
+      await this.ctx.suspend();
+      this.isRunning = false;
+      return false;
+    }
+    return false;
   }
 
   public async resumeContext(): Promise<void> {
+    this.initAudio();
     if (this.ctx && this.ctx.state === 'suspended') {
       await this.ctx.resume();
       this.isRunning = true;
@@ -450,8 +588,12 @@ export class VectorAudioEngine {
     this.octaState.autoNormalize = normalize;
   }
 
-  public updateOctaModMatrix(routings: ModRouting[]) {
-    this.octaState.modulationMatrix = { routings };
+  public updateOctaModMatrix(routings: ModRouting[] | { routings: ModRouting[] }) {
+    if (Array.isArray(routings)) {
+      this.octaState.modulationMatrix = { routings };
+    } else if (routings && Array.isArray((routings as any).routings)) {
+      this.octaState.modulationMatrix = { routings: (routings as any).routings };
+    }
     this.synthesisMode = 'octa';
   }
 
@@ -485,16 +627,6 @@ export class VectorAudioEngine {
     const sampleRate = e.outputBuffer.sampleRate;
     const dt = 1 / sampleRate;
 
-    // If synthesizer scope feed is muted/disabled, zero out generator buffer
-    if (!this.feedSynthesizerToScope) {
-      for (let i = 0; i < len; i++) {
-        leftOut[i] = 0;
-        rightOut[i] = 0;
-      }
-      this.levelSynthesizer = 0;
-      return;
-    }
-
     const cfgX = this.configX;
     const cfgY = this.configY;
 
@@ -506,8 +638,14 @@ export class VectorAudioEngine {
     const muteX = cfgX.mute || (cfgY.solo && !cfgX.solo);
     const muteY = cfgY.mute || (cfgX.solo && !cfgY.solo);
 
+    const activeTab = this.tabChannelsState[this.appMode];
+    const isTabPaused = activeTab ? activeTab.isPaused : false;
+    const isTabMuted = activeTab ? activeTab.isMuted : false;
+
     for (let i = 0; i < len; i++) {
-      const t = this.timeElapsed + i * dt;
+      const t = isTabPaused
+        ? this.properTimeElapsed
+        : (this.relativisticEnabled ? this.properTimeElapsed : (this.timeElapsed + i * dt));
       let valX = 0;
       let valY = 0;
 
@@ -547,26 +685,38 @@ export class VectorAudioEngine {
           }
         }
 
-        // Step 3: Compute final modulated outputs for each generator
-        const finalL1 = computeOctaSample(t, gens.L1, tuning, masterF, fmOffsets.L1, amFactors.L1);
-        const finalL2 = computeOctaSample(t, gens.L2, tuning, masterF, fmOffsets.L2, amFactors.L2);
-        const finalL3 = computeOctaSample(t, gens.L3, tuning, masterF, fmOffsets.L3, amFactors.L3);
-        const finalL4 = computeOctaSample(t, gens.L4, tuning, masterF, fmOffsets.L4, amFactors.L4);
+        // Step 3: Compute final modulated outputs for each generator using stateful phase accumulation
+        const finalVal: Record<GeneratorId, number> = {
+          L1: 0, L2: 0, L3: 0, L4: 0,
+          R1: 0, R2: 0, R3: 0, R4: 0
+        };
 
-        const finalR1 = computeOctaSample(t, gens.R1, tuning, masterF, fmOffsets.R1, amFactors.R1);
-        const finalR2 = computeOctaSample(t, gens.R2, tuning, masterF, fmOffsets.R2, amFactors.R2);
-        const finalR3 = computeOctaSample(t, gens.R3, tuning, masterF, fmOffsets.R3, amFactors.R3);
-        const finalR4 = computeOctaSample(t, gens.R4, tuning, masterF, fmOffsets.R4, amFactors.R4);
+        const gids: GeneratorId[] = ['L1', 'L2', 'L3', 'L4', 'R1', 'R2', 'R3', 'R4'];
+        for (const gid of gids) {
+          const gen = gens[gid];
+          if (gen.enabled && !gen.mute) {
+            const f0 = tuning === 'LOCKED' ? masterF : gen.baseFrequency;
+            const baseEffectiveFreq = computeQuarterToneFreq(f0, gen.quarterToneOffset);
+            const internalMod = gen.fmDepth > 0 ? 1 + gen.fmDepth * Math.sin(2 * Math.PI * gen.fmRate * t) : 1;
+            const instFreq = Math.max(1, (baseEffectiveFreq * internalMod) + fmOffsets[gid]);
+            if (!isTabPaused) {
+              this.octaPhases[gid] = (this.octaPhases[gid] + 2 * Math.PI * instFreq * dt) % (2 * Math.PI);
+            }
+            const raw = evalWaveform(gen.waveform, this.octaPhases[gid] + (gen.phase * Math.PI) / 180, gen.customHarmonics);
+            const effectiveAmp = Math.max(0, gen.amplitude * amFactors[gid]);
+            finalVal[gid] = (raw * effectiveAmp * gen.polarity + gen.offset) * gen.gain;
+          }
+        }
 
         // Mix Left Bus (X)
         const hasLeftSolo = gens.L1.solo || gens.L2.solo || gens.L3.solo || gens.L4.solo;
         let sumL = 0;
         let activeL = 0;
         const leftGens = [
-          { gen: gens.L1, val: finalL1 },
-          { gen: gens.L2, val: finalL2 },
-          { gen: gens.L3, val: finalL3 },
-          { gen: gens.L4, val: finalL4 },
+          { gen: gens.L1, val: finalVal.L1 },
+          { gen: gens.L2, val: finalVal.L2 },
+          { gen: gens.L3, val: finalVal.L3 },
+          { gen: gens.L4, val: finalVal.L4 },
         ];
         for (const item of leftGens) {
           const shouldPlay = hasLeftSolo ? item.gen.solo : (item.gen.enabled && !item.gen.mute);
@@ -586,10 +736,10 @@ export class VectorAudioEngine {
         let sumR = 0;
         let activeR = 0;
         const rightGens = [
-          { gen: gens.R1, val: finalR1 },
-          { gen: gens.R2, val: finalR2 },
-          { gen: gens.R3, val: finalR3 },
-          { gen: gens.R4, val: finalR4 },
+          { gen: gens.R1, val: finalVal.R1 },
+          { gen: gens.R2, val: finalVal.R2 },
+          { gen: gens.R3, val: finalVal.R3 },
+          { gen: gens.R4, val: finalVal.R4 },
         ];
         for (const item of rightGens) {
           const shouldPlay = hasRightSolo ? item.gen.solo : (item.gen.enabled && !item.gen.mute);
@@ -622,8 +772,37 @@ export class VectorAudioEngine {
         const rawX = p0[0] + (p1[0] - p0[0]) * subFrac;
         const rawY = p0[1] + (p1[1] - p0[1]) * subFrac;
 
-        valX = muteX ? 0 : (rawX * cfgX.amplitude * cfgX.polarity + cfgX.offset) * cfgX.gain;
-        valY = muteY ? 0 : (rawY * cfgY.amplitude * cfgY.polarity + cfgY.offset) * cfgY.gain;
+        // Blanking factor on jump: if scanner jumps too far, we damp the gain to prevent popping
+        const dx = p1[0] - p0[0];
+        const dy = p1[1] - p0[1];
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        let jumpBlanking = 1.0;
+        if (dist > 0.15) {
+          jumpBlanking = Math.max(0.0, 1.0 - (dist - 0.15) / 0.15);
+        }
+
+        // Color brightness modulation
+        let colorBrightness = 1.0;
+        if (this.customVectorColors && this.customVectorColors.length === N) {
+          const c0 = this.customVectorColors[idx0];
+          const c1 = this.customVectorColors[idx1];
+          const b0 = this.getColorBrightness(c0);
+          const b1 = this.getColorBrightness(c1);
+          colorBrightness = b0 + (b1 - b0) * subFrac;
+        } else if (this.customVectorColors && this.customVectorColors.length > 0) {
+          const c0 = this.customVectorColors[idx0 % this.customVectorColors.length];
+          colorBrightness = this.getColorBrightness(c0);
+        }
+
+        const ampX = (cfgX.amplitude !== undefined && cfgX.amplitude > 0) ? cfgX.amplitude : 0.8;
+        const gainX = (cfgX.gain !== undefined && cfgX.gain > 0) ? cfgX.gain : 1.0;
+        const ampY = (cfgY.amplitude !== undefined && cfgY.amplitude > 0) ? cfgY.amplitude : 0.8;
+        const gainY = (cfgY.gain !== undefined && cfgY.gain > 0) ? cfgY.gain : 1.0;
+
+        const totalModulation = colorBrightness * jumpBlanking;
+
+        valX = muteX ? 0 : (rawX * ampX * cfgX.polarity + cfgX.offset) * gainX * totalModulation;
+        valY = muteY ? 0 : (rawY * ampY * cfgY.polarity + cfgY.offset) * gainY * totalModulation;
       } else if (this.synthesisMode === 'video_stereo') {
         // Dual Audio-Visual Stereo Re-Synthesis (Mono Video -> Stereo Lissajous guided by visual)
         const N = this.videoTrajectoryPoints.length;
@@ -685,8 +864,8 @@ export class VectorAudioEngine {
         this.phaseAccumX += 2 * Math.PI * cfgX.frequency * modX * dt;
         this.phaseAccumY += 2 * Math.PI * cfgY.frequency * modY * dt;
 
-        if (this.phaseAccumX > 1e6) this.phaseAccumX %= 2 * Math.PI;
-        if (this.phaseAccumY > 1e6) this.phaseAccumY %= 2 * Math.PI;
+        this.phaseAccumX %= 2 * Math.PI;
+        this.phaseAccumY %= 2 * Math.PI;
 
         const currentPhaseX = this.phaseAccumX + (cfgX.phase * Math.PI) / 180;
         const currentPhaseY = this.phaseAccumY + (cfgY.phase * Math.PI) / 180;
@@ -698,22 +877,96 @@ export class VectorAudioEngine {
         valY = muteY ? 0 : (rawValY * cfgY.amplitude * cfgY.polarity + cfgY.offset) * cfgY.gain;
       }
 
+      // Additive Piano Perturbation
+      if (this.pianoState.active || this.pianoState.currentAmp > 0.0001) {
+        if (this.pianoState.currentAmp < this.pianoState.targetAmp) {
+          this.pianoState.currentAmp = Math.min(this.pianoState.targetAmp, this.pianoState.currentAmp + 0.008); // Fast attack
+        } else if (this.pianoState.currentAmp > this.pianoState.targetAmp) {
+          this.pianoState.currentAmp = Math.max(this.pianoState.targetAmp, this.pianoState.currentAmp - 0.0008); // Smooth release
+        }
+
+        this.pianoState.phaseX += 2 * Math.PI * this.pianoState.freqX * dt;
+        this.pianoState.phaseY += 2 * Math.PI * this.pianoState.freqY * dt;
+        if (this.pianoState.phaseX > 2 * Math.PI) this.pianoState.phaseX -= 2 * Math.PI;
+        if (this.pianoState.phaseY > 2 * Math.PI) this.pianoState.phaseY -= 2 * Math.PI;
+
+        const pX = evalWaveform(this.pianoState.waveform, this.pianoState.phaseX, []) * this.pianoState.currentAmp;
+        const pY = evalWaveform(this.pianoState.waveform, this.pianoState.phaseY, []) * this.pianoState.currentAmp;
+
+        valX += pX;
+        valY += pY;
+        
+        if (this.pianoState.currentAmp <= 0.0001 && this.pianoState.targetAmp === 0) {
+          this.pianoState.active = false;
+        }
+      }
+
+      if (isTabPaused || isTabMuted) {
+        valX = 0;
+        valY = 0;
+      }
+
       // Clipping check
       if (Math.abs(valX) >= 0.99 || Math.abs(valY) >= 0.99) {
         localClipping = true;
       }
 
-      leftOut[i] = valX;
-      rightOut[i] = valY;
-      sumSynthLevel += valX * valX + valY * valY;
+      // Smooth beam deflector plates inertia: acts as an analog reconstruction filter.
+      // This eliminates 100% of the sharp infinite-slope "popcorn" crackling peaks
+      // without affecting the beautiful geometric shapes on the scope.
+      const alpha = 0.72;
+      this.smoothValX = this.smoothValX * alpha + valX * (1 - alpha);
+      this.smoothValY = this.smoothValY * alpha + valY * (1 - alpha);
+
+      leftOut[i] = this.smoothValX;
+      rightOut[i] = this.smoothValY;
+      sumSynthLevel += this.smoothValX * this.smoothValX + this.smoothValY * this.smoothValY;
 
       // Store sample in visual buffer every few samples for responsive rendering
       if (i % 2 === 0) {
-        points.push([valX, valY]);
+        points.push([this.smoothValX, this.smoothValY]);
       }
+
+      if (this.relativisticEnabled) {
+        // Calculate velocity of coordinates (change per sample dt)
+        const dx = valX - this.prevValX;
+        const dy = valY - this.prevValY;
+        const velocity = Math.sqrt(dx * dx + dy * dy) / dt; // unitless speed per second
+        
+        // Speed of light limit
+        const C = this.speedOfLightLimit;
+        const beta = Math.min(0.999, velocity / C);
+        const srFactor = Math.sqrt(1 - beta * beta); // proper time slows down at high velocity (SR)
+        
+        // General relativistic factor: time slows down near the high-energy center (gravity / confinement)
+        const radialDist = Math.sqrt(valX * valX + valY * valY);
+        const grFactor = Math.max(0.01, 1.0 - this.gravitationalDilationDepth * Math.max(0, 1.0 - radialDist));
+        
+        // Combined proper time increment
+        const dTau = dt * srFactor * grFactor;
+        if (!isTabPaused) {
+          this.properTimeElapsed += dTau;
+        }
+      } else {
+        // Keep properTimeElapsed synchronized with coordinate time
+        if (!isTabPaused) {
+          this.properTimeElapsed = this.timeElapsed + (i + 1) * dt;
+        }
+      }
+
+      this.prevValX = valX;
+      this.prevValY = valY;
     }
 
-    this.timeElapsed += len * dt;
+    if (!isTabPaused) {
+      if (this.synthesisMode === 'video_stereo') {
+        this.videoPlaybackTime += len * dt * this.videoPlaybackRate;
+        if (this.videoAudioBuffer) {
+          this.videoPlaybackTime %= this.videoAudioBuffer.duration;
+        }
+      }
+      this.timeElapsed += len * dt;
+    }
     this.xyPoints = points;
     this.levelSynthesizer = Math.min(1.0, Math.sqrt(sumSynthLevel / (len * 2)) * 2);
 
@@ -748,13 +1001,25 @@ export class VectorAudioEngine {
     this.analyserX.getByteFrequencyData(this.freqBufferX);
     this.analyserY.getByteFrequencyData(this.freqBufferY);
 
-    // Compute active combined points from analysers if playing
+    // If vector path synthesis is active, maintain the high-precision vector points persistently
+    if (this.synthesisMode === 'vector_path' && this.customVectorPoints && this.customVectorPoints.length > 0) {
+      this.xyPoints = this.customVectorPoints;
+      return;
+    }
+
+    // Compute active combined points from analysers if playing other modes
     const combinedPoints: Array<[number, number]> = [];
     const step = 2;
+    let hasSignal = false;
     for (let i = 0; i < this.rawBufferX.length; i += step) {
-      combinedPoints.push([this.rawBufferX[i], this.rawBufferY[i]]);
+      const px = this.rawBufferX[i];
+      const py = this.rawBufferY[i];
+      if (Math.abs(px) > 0.005 || Math.abs(py) > 0.005) {
+        hasSignal = true;
+      }
+      combinedPoints.push([px, py]);
     }
-    if (combinedPoints.length > 10) {
+    if (hasSignal && combinedPoints.length > 10) {
       this.xyPoints = combinedPoints;
     }
   }
@@ -1125,5 +1390,11 @@ export class VectorAudioEngine {
 
   public getIsRecording(): boolean {
     return this.isRecording;
+  }
+
+  public setRelativisticSettings(enabled: boolean, speedOfLight: number, gravityDepth: number) {
+    this.relativisticEnabled = enabled;
+    this.speedOfLightLimit = speedOfLight;
+    this.gravitationalDilationDepth = gravityDepth;
   }
 }
