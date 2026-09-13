@@ -1,0 +1,1 @@
+Session backup for 2026-09-12. Preserve current project decisions, audit findings, repair branch state, and next steps. Backup branch only; do not merge into main as code.
