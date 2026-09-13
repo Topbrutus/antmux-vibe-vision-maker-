@@ -1,0 +1,1 @@
+Antmux Vibe Vision Maker session backup. Repair branch: repair/p0-wiring-2026-09-12. Verified repair HEAD: b6e78ed95d4b61ef50ecdee56d1d4c71bd03e49b. Main was not modified. Draft PR 1 remains unmerged. Eight-generator design: four LEFT/X generators and four RIGHT/Y generators, each with independent quarter-tone tuning.
