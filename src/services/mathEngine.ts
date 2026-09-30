@@ -37,8 +37,7 @@ export function evalWaveform(
     case 'sawtooth_down':
       return 1 - (normPhase / Math.PI);
     case 'noise':
-      // Gentle textured background "dust" (poussière), not a massive earthquake
-      return (Math.random() * 2 - 1) * 0.08;
+      return (Math.random() * 2 - 1);
     case 'custom': {
       let sum = 0;
       let totalWeight = 0;
@@ -1298,17 +1297,6 @@ export function updateAndGenerateContourNoise(
   const width = Math.max(0.05, bbox.maxX - bbox.minX);
   const height = Math.max(0.05, bbox.maxY - bbox.minY);
 
-  // 1. Calculate sound energy based on average distance from polygon points to their center.
-  // Full scale sounds have points stretching to margins (~0.4 - 0.7 radius).
-  // Quiet or muted sounds will collapse near 0.
-  let totalDist = 0;
-  for (let i = 0; i < polygon.length; i++) {
-    totalDist += Math.hypot(polygon[i][0] - bbox.cx, polygon[i][1] - bbox.cy);
-  }
-  const avgRadius = totalDist / polygon.length;
-  // soundEnergy will scale from 0.0 up to ~1.5 depending on amplitude
-  const soundEnergy = Math.max(0.0, Math.min(2.0, avgRadius / 0.35));
-
   const spawnAtCenter = (): { x: number, y: number, vx: number, vy: number, life: number } => {
     let px = bbox.cx;
     let py = bbox.cy;
@@ -1326,8 +1314,8 @@ export function updateAndGenerateContourNoise(
       }
     }
     const angle = Math.random() * Math.PI * 2;
-    // Velocity is directed outwards from center and is scaled by the sound energy
-    const spd = (0.2 + Math.random() * 0.8) * bounceSpeed * 1.8 * Math.max(0.1, soundEnergy);
+    // Velocity is directed outwards from center to simulate expansion
+    const spd = (0.2 + Math.random() * 0.8) * bounceSpeed * 1.8;
     return {
       x: px,
       y: py,
@@ -1353,14 +1341,13 @@ export function updateAndGenerateContourNoise(
   for (let i = 0; i < particlesRef.length; i++) {
     const p = particlesRef[i];
     
-    // Jitter scales directly with the sound energy
-    const jitterMag = (0.005 * freqFactor) * soundEnergy;
+    // Jitter according to frequency
+    const jitterMag = (0.005 * freqFactor);
     const jx = (Math.random() - 0.5) * jitterMag;
     const jy = (Math.random() - 0.5) * jitterMag;
 
-    // Movement velocity is scaled by sound energy (they move/flicker faster with sound, calm when silent)
-    let nextX = p.x + p.vx * effectiveDt * soundEnergy + jx;
-    let nextY = p.y + p.vy * effectiveDt * soundEnergy + jy;
+    let nextX = p.x + p.vx * effectiveDt + jx;
+    let nextY = p.y + p.vy * effectiveDt + jy;
 
     // Test if next position is inside the contour
     if (!isPointInContourPolygon([nextX, nextY], polygon)) {
@@ -1374,8 +1361,7 @@ export function updateAndGenerateContourNoise(
     } else {
        p.x = nextX;
        p.y = nextY;
-       // Life progression scales with sound energy
-       p.life = (p.life + effectiveDt * 2 * (0.2 + 0.8 * soundEnergy)) % 1;
+       p.life = (p.life + effectiveDt * 2) % 1;
     }
     
     // Calculate brightness: dimmer as they move further away (distancing energy)
@@ -1387,7 +1373,7 @@ export function updateAndGenerateContourNoise(
     
     // Bright in center, fading out exponentially towards edges
     const distanceFade = Math.pow(1.0 - normDist, 1.5);
-    const bright = Math.max(0.05, distanceFade) * (0.5 + 0.5 * Math.sin(p.life * Math.PI)) * (0.2 + 0.8 * soundEnergy);
+    const bright = Math.max(0.05, distanceFade) * (0.5 + 0.5 * Math.sin(p.life * Math.PI));
 
     resultPoints.push({
       x: p.x,

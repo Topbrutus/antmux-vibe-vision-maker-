@@ -2131,6 +2131,9 @@ export default function App() {
                 setCurrentPreset(name as any);
                 setSourceLabel(`PIANO : ${name}`);
               }}
+              onAudioStateChange={(running) => {
+                setIsPlaying(running);
+              }}
             />
 </div>)}
 

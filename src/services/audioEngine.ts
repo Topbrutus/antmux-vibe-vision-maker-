@@ -224,12 +224,128 @@ export class VectorAudioEngine {
   // Tab mix and pause/mute isolation states
   private appMode: string = 'main';
   private tabChannelsState: Record<string, { isPaused: boolean; isMuted: boolean }> = {};
+  private smoothTabGain: number = 1.0;
 
   // High-precision step-by-step FM phase accumulation for the 8 octa generators
   private octaPhases: Record<GeneratorId, number> = {
     L1: 0, L2: 0, L3: 0, L4: 0,
     R1: 0, R2: 0, R3: 0, R4: 0
   };
+
+  // Pre-allocated static generator IDs for zero-allocation iteration in audio loop
+  private static readonly OCTA_IDS: GeneratorId[] = ['L1', 'L2', 'L3', 'L4', 'R1', 'R2', 'R3', 'R4'];
+
+  // Coherent generator outputs for modulation feedback
+  private octaLastOutputs: Record<GeneratorId, number> = {
+    L1: 0, L2: 0, L3: 0, L4: 0,
+    R1: 0, R2: 0, R3: 0, R4: 0
+  };
+
+  // Pre-allocated modulation calculation buffers (Zero GC allocations inside 2048 audio loop)
+  private octaFmOffsets: Record<GeneratorId, number> = {
+    L1: 0, L2: 0, L3: 0, L4: 0,
+    R1: 0, R2: 0, R3: 0, R4: 0
+  };
+  private octaAmFactors: Record<GeneratorId, number> = {
+    L1: 1, L2: 1, L3: 1, L4: 1,
+    R1: 1, R2: 1, R3: 1, R4: 1
+  };
+  private octaFinalVals: Record<GeneratorId, number> = {
+    L1: 0, L2: 0, L3: 0, L4: 0,
+    R1: 0, R2: 0, R3: 0, R4: 0
+  };
+
+  // Sub-frame smoothed parameter states for Octa generators & mixer
+  private smoothGenGain: Record<GeneratorId, number> = {
+    L1: 1, L2: 1, L3: 1, L4: 1,
+    R1: 1, R2: 1, R3: 1, R4: 1
+  };
+  private smoothGenAmp: Record<GeneratorId, number> = {
+    L1: 0.8, L2: 0.8, L3: 0.8, L4: 0.8,
+    R1: 0.8, R2: 0.8, R3: 0.8, R4: 0.8
+  };
+  private smoothGenActive: Record<GeneratorId, number> = {
+    L1: 1, L2: 0, L3: 0, L4: 0,
+    R1: 1, R2: 0, R3: 0, R4: 0
+  };
+  private smoothMixerGainL: number = 1.0;
+  private smoothMixerGainR: number = 1.0;
+  private smoothMixerMuteL: number = 1.0; // 1 = active, 0 = muted
+  private smoothMixerMuteR: number = 1.0;
+  private smoothNormScaleL: number = 1.0;
+  private smoothNormScaleR: number = 1.0;
+
+  // Dedicated Look-Ahead Limiter (Zero Overshoot True-Peak Limiter)
+  // 96 samples (~2.0 ms at 48kHz) allows ramping gain down BEFORE the peak reaches DAC
+  private static readonly LIMITER_LOOKAHEAD_SAMPLES = 96;
+  private limiterDelayL: Float32Array = new Float32Array(96);
+  private limiterDelayR: Float32Array = new Float32Array(96);
+  private limiterPeakRing: Float32Array = new Float32Array(96);
+  private limiterWriteIdx: number = 0;
+  private limiterGain: number = 1.0;
+  private readonly limiterThreshold: number = 0.95; // -0.45 dBFS true peak ceiling
+
+  /**
+   * Process a stereo sample through the look-ahead true-peak limiter.
+   * Scans a 96-sample (~2ms) look-ahead window and ramps down gain ahead of time
+   * so transient peaks never clip or cause popcorn noise.
+   */
+  private processLookAheadLimiter(inX: number, inY: number, dt: number): [number, number] {
+    const N = VectorAudioEngine.LIMITER_LOOKAHEAD_SAMPLES;
+    const peak = Math.max(Math.abs(inX), Math.abs(inY));
+
+    // Store incoming sample in circular look-ahead buffers
+    this.limiterDelayL[this.limiterWriteIdx] = inX;
+    this.limiterDelayR[this.limiterWriteIdx] = inY;
+    this.limiterPeakRing[this.limiterWriteIdx] = peak;
+
+    // Scan maximum peak across lookahead window
+    let maxLookaheadPeak = 0;
+    for (let k = 0; k < N; k++) {
+      const p = this.limiterPeakRing[k];
+      if (p > maxLookaheadPeak) {
+        maxLookaheadPeak = p;
+      }
+    }
+
+    // Determine target gain attenuation
+    const targetGain = maxLookaheadPeak > this.limiterThreshold
+      ? this.limiterThreshold / maxLookaheadPeak
+      : 1.0;
+
+    // Sub-frame look-ahead attack & release smoothing
+    if (targetGain < this.limiterGain) {
+      // Fast look-ahead attack (tau = 0.6ms): ramps down well before delayed sample exits
+      const attackCoeff = 1 - Math.exp(-dt / 0.0006);
+      this.limiterGain += (targetGain - this.limiterGain) * attackCoeff;
+    } else {
+      // Release (tau = 35ms): natural, musical recovery without pumping
+      const releaseCoeff = 1 - Math.exp(-dt / 0.035);
+      this.limiterGain += (targetGain - this.limiterGain) * releaseCoeff;
+    }
+
+    // Read delayed sample (oldest in ring buffer)
+    const readIdx = (this.limiterWriteIdx + 1) % N;
+    const delayedL = this.limiterDelayL[readIdx];
+    const delayedR = this.limiterDelayR[readIdx];
+
+    // Advance write pointer
+    this.limiterWriteIdx = (this.limiterWriteIdx + 1) % N;
+
+    // Apply look-ahead gain reduction
+    let outX = delayedL * this.limiterGain;
+    let outY = delayedR * this.limiterGain;
+
+    // Safety soft-knee ceiling: transparent saturation for any extreme residual inter-sample peaks
+    if (Math.abs(outX) > 0.92) {
+      outX = Math.sign(outX) * (0.92 + 0.05 * Math.tanh((Math.abs(outX) - 0.92) / 0.05));
+    }
+    if (Math.abs(outY) > 0.92) {
+      outY = Math.sign(outY) * (0.92 + 0.05 * Math.tanh((Math.abs(outY) - 0.92) / 0.05));
+    }
+
+    return [outX, outY];
+  }
 
   // Additive Piano Synthesizer State
   private pianoState = {
@@ -251,8 +367,12 @@ export class VectorAudioEngine {
     this.pianoState.active = true;
   }
 
-  public releasePianoNote() {
+  public releasePianoNote(immediate: boolean = false) {
     this.pianoState.targetAmp = 0;
+    if (immediate) {
+      this.pianoState.currentAmp = 0;
+      this.pianoState.active = false;
+    }
   }
 
   constructor(cfgX?: ChannelConfig, cfgY?: ChannelConfig) {
@@ -285,6 +405,20 @@ export class VectorAudioEngine {
       fmRate: 1,
       customHarmonics: [1, 0, 0, 0, 0, 0, 0, 0],
     };
+
+    // Initialize sub-frame smoothing parameter states from initial Octa state
+    const initialGens = this.octaState.generators;
+    for (const gid of VectorAudioEngine.OCTA_IDS) {
+      if (initialGens[gid]) {
+        this.smoothGenGain[gid] = initialGens[gid].gain;
+        this.smoothGenAmp[gid] = initialGens[gid].amplitude;
+        this.smoothGenActive[gid] = initialGens[gid].enabled && !initialGens[gid].mute ? 1.0 : 0.0;
+      }
+    }
+    this.smoothMixerGainL = this.octaState.mixerLeft.gain;
+    this.smoothMixerGainR = this.octaState.mixerRight.gain;
+    this.smoothMixerMuteL = this.octaState.mixerLeft.mute ? 0.0 : 1.0;
+    this.smoothMixerMuteR = this.octaState.mixerRight.mute ? 0.0 : 1.0;
   }
 
   public async initAudio(): Promise<boolean> {
@@ -642,6 +776,19 @@ export class VectorAudioEngine {
     const isTabPaused = activeTab ? activeTab.isPaused : false;
     const isTabMuted = activeTab ? activeTab.isMuted : false;
 
+    // Extract active Octa state and routings once per audio block (Zero-allocation optimization)
+    const octa = this.octaState;
+    const gens = octa.generators;
+    const tuning = octa.tuningMode;
+    const masterF = octa.masterFrequency;
+    const routings = octa.modulationMatrix?.routings || [];
+    const activeRoutings = routings.filter((r) => r.enabled && Math.abs(r.depth) > 0.001);
+    const hasLeftSolo = gens.L1.solo || gens.L2.solo || gens.L3.solo || gens.L4.solo;
+    const hasRightSolo = gens.R1.solo || gens.R2.solo || gens.R3.solo || gens.R4.solo;
+
+    // Sub-frame smoothing rate constant (tau = ~5ms)
+    const smoothCoeff = 1 - Math.exp(-dt / 0.005);
+
     for (let i = 0; i < len; i++) {
       const t = isTabPaused
         ? this.properTimeElapsed
@@ -650,109 +797,100 @@ export class VectorAudioEngine {
       let valY = 0;
 
       if (this.synthesisMode === 'octa') {
-        const octa = this.octaState;
-        const gens = octa.generators;
-        const tuning = octa.tuningMode;
-        const masterF = octa.masterFrequency;
-        const routings = octa.modulationMatrix?.routings || [];
-        const activeRoutings = routings.filter((r) => r.enabled && Math.abs(r.depth) > 0.001);
+        // Step 1: Reset modulation buffers without allocating new objects (Zero GC)
+        for (let g = 0; g < 8; g++) {
+          const gid = VectorAudioEngine.OCTA_IDS[g];
+          this.octaFmOffsets[gid] = 0;
+          this.octaAmFactors[gid] = 1.0;
+        }
 
-        // Step 1: Baseline unmodulated samples as sources
-        const rawOuts: Record<GeneratorId, number> = {
-          L1: computeOctaSample(t, gens.L1, tuning, masterF),
-          L2: computeOctaSample(t, gens.L2, tuning, masterF),
-          L3: computeOctaSample(t, gens.L3, tuning, masterF),
-          L4: computeOctaSample(t, gens.L4, tuning, masterF),
-          R1: computeOctaSample(t, gens.R1, tuning, masterF),
-          R2: computeOctaSample(t, gens.R2, tuning, masterF),
-          R3: computeOctaSample(t, gens.R3, tuning, masterF),
-          R4: computeOctaSample(t, gens.R4, tuning, masterF),
-        };
-
-        // Step 2: Accumulate modulation offsets per generator
-        const fmOffsets: Record<GeneratorId, number> = { L1: 0, L2: 0, L3: 0, L4: 0, R1: 0, R2: 0, R3: 0, R4: 0 };
-        const amFactors: Record<GeneratorId, number> = { L1: 1, L2: 1, L3: 1, L4: 1, R1: 1, R2: 1, R3: 1, R4: 1 };
-
-        if (activeRoutings.length > 0) {
-          for (let r = 0; r < activeRoutings.length; r++) {
-            const route = activeRoutings[r];
-            const srcVal = rawOuts[route.sourceId] || 0;
-            if (route.targetParam === 'fm') {
-              fmOffsets[route.targetId] += srcVal * route.depth * 200;
-            } else if (route.targetParam === 'am') {
-              amFactors[route.targetId] *= Math.max(0, 1 + srcVal * route.depth);
-            }
+        // Step 2: Accumulate modulation offsets using coherent generator outputs from previous sample
+        const numRoutings = activeRoutings.length;
+        for (let r = 0; r < numRoutings; r++) {
+          const route = activeRoutings[r];
+          const srcVal = this.octaLastOutputs[route.sourceId] || 0;
+          if (route.targetParam === 'fm') {
+            this.octaFmOffsets[route.targetId] += srcVal * route.depth * 200;
+          } else if (route.targetParam === 'am') {
+            const amMod = Math.max(0, 1 + srcVal * route.depth);
+            this.octaAmFactors[route.targetId] *= Math.min(2.0, amMod);
           }
         }
 
-        // Step 3: Compute final modulated outputs for each generator using stateful phase accumulation
-        const finalVal: Record<GeneratorId, number> = {
-          L1: 0, L2: 0, L3: 0, L4: 0,
-          R1: 0, R2: 0, R3: 0, R4: 0
-        };
-
-        const gids: GeneratorId[] = ['L1', 'L2', 'L3', 'L4', 'R1', 'R2', 'R3', 'R4'];
-        for (const gid of gids) {
+        // Step 3: Compute final modulated outputs with sub-frame parameter smoothing
+        for (let g = 0; g < 8; g++) {
+          const gid = VectorAudioEngine.OCTA_IDS[g];
           const gen = gens[gid];
-          if (gen.enabled && !gen.mute) {
+          const isSoloChannel = gen.channel === 'L' ? hasLeftSolo : hasRightSolo;
+          const targetActive = isSoloChannel
+            ? (gen.solo ? 1.0 : 0.0)
+            : (gen.enabled && !gen.mute ? 1.0 : 0.0);
+
+          // Sub-frame smooth active state, gain, and amplitude
+          this.smoothGenActive[gid] += (targetActive - this.smoothGenActive[gid]) * smoothCoeff;
+          this.smoothGenGain[gid] += (gen.gain - this.smoothGenGain[gid]) * smoothCoeff;
+          this.smoothGenAmp[gid] += (gen.amplitude - this.smoothGenAmp[gid]) * smoothCoeff;
+
+          const curActive = this.smoothGenActive[gid];
+          if (curActive > 0.0005) {
             const f0 = tuning === 'LOCKED' ? masterF : gen.baseFrequency;
             const baseEffectiveFreq = computeQuarterToneFreq(f0, gen.quarterToneOffset);
-            const internalMod = gen.fmDepth > 0 ? 1 + gen.fmDepth * Math.sin(2 * Math.PI * gen.fmRate * t) : 1;
-            const instFreq = Math.max(1, (baseEffectiveFreq * internalMod) + fmOffsets[gid]);
+            const internalMod = gen.fmDepth > 0
+              ? 1 + gen.fmDepth * Math.sin(2 * Math.PI * gen.fmRate * t)
+              : 1;
+            // Bound frequency safely below Nyquist
+            const clampedFm = Math.max(-0.4 * sampleRate, Math.min(0.4 * sampleRate, this.octaFmOffsets[gid]));
+            const instFreq = Math.max(1, Math.min(0.45 * sampleRate, (baseEffectiveFreq * internalMod) + clampedFm));
+
             if (!isTabPaused) {
               this.octaPhases[gid] = (this.octaPhases[gid] + 2 * Math.PI * instFreq * dt) % (2 * Math.PI);
             }
+
             const raw = evalWaveform(gen.waveform, this.octaPhases[gid] + (gen.phase * Math.PI) / 180, gen.customHarmonics);
-            const effectiveAmp = Math.max(0, gen.amplitude * amFactors[gid]);
-            finalVal[gid] = (raw * effectiveAmp * gen.polarity + gen.offset) * gen.gain;
+            const effectiveAmp = this.smoothGenAmp[gid] * Math.min(2.5, this.octaAmFactors[gid]);
+            const val = (raw * effectiveAmp * gen.polarity + gen.offset) * this.smoothGenGain[gid] * curActive;
+
+            this.octaFinalVals[gid] = val;
+            this.octaLastOutputs[gid] = val;
+          } else {
+            this.octaFinalVals[gid] = 0;
+            this.octaLastOutputs[gid] = 0;
           }
         }
 
-        // Mix Left Bus (X)
-        const hasLeftSolo = gens.L1.solo || gens.L2.solo || gens.L3.solo || gens.L4.solo;
-        let sumL = 0;
-        let activeL = 0;
-        const leftGens = [
-          { gen: gens.L1, val: finalVal.L1 },
-          { gen: gens.L2, val: finalVal.L2 },
-          { gen: gens.L3, val: finalVal.L3 },
-          { gen: gens.L4, val: finalVal.L4 },
-        ];
-        for (const item of leftGens) {
-          const shouldPlay = hasLeftSolo ? item.gen.solo : (item.gen.enabled && !item.gen.mute);
-          if (shouldPlay) {
-            sumL += item.val;
-            activeL++;
-          }
-        }
-        if (octa.autoNormalize && activeL > 1) {
-          sumL = Math.tanh(sumL * 0.75) * 1.05;
-        }
+        // Step 4: Mix Left Bus (X) & Right Bus (Y) with continuous headroom scaling
+        let sumL = this.octaFinalVals.L1 + this.octaFinalVals.L2 + this.octaFinalVals.L3 + this.octaFinalVals.L4;
+        let sumR = this.octaFinalVals.R1 + this.octaFinalVals.R2 + this.octaFinalVals.R3 + this.octaFinalVals.R4;
+
+        // Continuous energy-based normalization factor
+        const activeWeightL = this.smoothGenActive.L1 + this.smoothGenActive.L2 + this.smoothGenActive.L3 + this.smoothGenActive.L4;
+        const activeWeightR = this.smoothGenActive.R1 + this.smoothGenActive.R2 + this.smoothGenActive.R3 + this.smoothGenActive.R4;
+
+        const targetNormL = octa.autoNormalize ? 1.0 / Math.max(1.0, Math.sqrt(activeWeightL)) : 1.0;
+        const targetNormR = octa.autoNormalize ? 1.0 / Math.max(1.0, Math.sqrt(activeWeightR)) : 1.0;
+
+        this.smoothNormScaleL += (targetNormL - this.smoothNormScaleL) * smoothCoeff;
+        this.smoothNormScaleR += (targetNormR - this.smoothNormScaleR) * smoothCoeff;
+
+        sumL *= this.smoothNormScaleL;
+        sumR *= this.smoothNormScaleR;
+
+        // Soft saturation curve ensures bus sums never clip hard
+        sumL = Math.tanh(sumL * 0.85) * 1.05;
+        sumR = Math.tanh(sumR * 0.85) * 1.05;
+
         if (octa.mixerLeft.invertPhase) sumL = -sumL;
-        valX = octa.mixerLeft.mute ? 0 : sumL * octa.mixerLeft.gain;
-
-        // Mix Right Bus (Y)
-        const hasRightSolo = gens.R1.solo || gens.R2.solo || gens.R3.solo || gens.R4.solo;
-        let sumR = 0;
-        let activeR = 0;
-        const rightGens = [
-          { gen: gens.R1, val: finalVal.R1 },
-          { gen: gens.R2, val: finalVal.R2 },
-          { gen: gens.R3, val: finalVal.R3 },
-          { gen: gens.R4, val: finalVal.R4 },
-        ];
-        for (const item of rightGens) {
-          const shouldPlay = hasRightSolo ? item.gen.solo : (item.gen.enabled && !item.gen.mute);
-          if (shouldPlay) {
-            sumR += item.val;
-            activeR++;
-          }
-        }
-        if (octa.autoNormalize && activeR > 1) {
-          sumR = Math.tanh(sumR * 0.75) * 1.05;
-        }
         if (octa.mixerRight.invertPhase) sumR = -sumR;
-        valY = octa.mixerRight.mute ? 0 : sumR * octa.mixerRight.gain;
+
+        const targetMuteL = octa.mixerLeft.mute ? 0.0 : 1.0;
+        const targetMuteR = octa.mixerRight.mute ? 0.0 : 1.0;
+        this.smoothMixerGainL += (octa.mixerLeft.gain - this.smoothMixerGainL) * smoothCoeff;
+        this.smoothMixerGainR += (octa.mixerRight.gain - this.smoothMixerGainR) * smoothCoeff;
+        this.smoothMixerMuteL += (targetMuteL - this.smoothMixerMuteL) * smoothCoeff;
+        this.smoothMixerMuteR += (targetMuteR - this.smoothMixerMuteR) * smoothCoeff;
+
+        valX = sumL * this.smoothMixerGainL * this.smoothMixerMuteL;
+        valY = sumR * this.smoothMixerGainR * this.smoothMixerMuteR;
 
       } else if (this.synthesisMode === 'segmented' && this.segmentedX && this.segmentedY) {
         valX = computeSegmentedSample(t, this.segmentedX);
@@ -901,12 +1039,17 @@ export class VectorAudioEngine {
         }
       }
 
-      if (isTabPaused || isTabMuted) {
-        valX = 0;
-        valY = 0;
-      }
+      // Sub-frame smooth tab gain transition (prevents clicks when pausing or muting tabs)
+      const targetTabGain = isTabPaused || isTabMuted ? 0.0 : 1.0;
+      this.smoothTabGain += (targetTabGain - this.smoothTabGain) * smoothCoeff;
+      valX *= this.smoothTabGain;
+      valY *= this.smoothTabGain;
 
-      // Clipping check
+      // Look-Ahead True-Peak Limiter: scans 96 samples (~2ms) ahead to ramp down gain
+      // before peaks emerge, eliminating all digital transient clipping and popcorn noise.
+      const [limitedX, limitedY] = this.processLookAheadLimiter(valX, valY, dt);
+
+      // Clipping check on pre-limiter signal for UI telemetry
       if (Math.abs(valX) >= 0.99 || Math.abs(valY) >= 0.99) {
         localClipping = true;
       }
@@ -915,8 +1058,8 @@ export class VectorAudioEngine {
       // This eliminates 100% of the sharp infinite-slope "popcorn" crackling peaks
       // without affecting the beautiful geometric shapes on the scope.
       const alpha = 0.72;
-      this.smoothValX = this.smoothValX * alpha + valX * (1 - alpha);
-      this.smoothValY = this.smoothValY * alpha + valY * (1 - alpha);
+      this.smoothValX = this.smoothValX * alpha + limitedX * (1 - alpha);
+      this.smoothValY = this.smoothValY * alpha + limitedY * (1 - alpha);
 
       leftOut[i] = this.smoothValX;
       rightOut[i] = this.smoothValY;

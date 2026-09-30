@@ -30,6 +30,7 @@ interface HarmonicPianoPanelProps {
   onUpdateConfigX: (cfg: Partial<ChannelConfig>) => void;
   onUpdateConfigY: (cfg: Partial<ChannelConfig>) => void;
   onSelectPresetName: (name: string) => void;
+  onAudioStateChange?: (running: boolean) => void;
 }
 
 // Sacred & Musical signs
@@ -93,6 +94,7 @@ export const HarmonicPianoPanel: React.FC<HarmonicPianoPanelProps> = ({
   onUpdateConfigX,
   onUpdateConfigY,
   onSelectPresetName,
+  onAudioStateChange,
 }) => {
   const [tuningBase, setTuningBase] = useState<440 | 432 | 528>(432);
   const [currentOctave, setCurrentOctave] = useState<number>(4);
@@ -211,22 +213,20 @@ export const HarmonicPianoPanel: React.FC<HarmonicPianoPanelProps> = ({
   const keys = useMemo(() => generateKeys(), [currentOctave, tuningBase]);
 
   // Silence / Stop note completely ("Rien du tout")
-  const stopNote = useCallback(() => {
+  const stopNote = useCallback((immediate: boolean = false) => {
     setActiveNoteName(null);
     if (isPlayingArp) setIsPlayingArp(false);
-    engine.releasePianoNote();
+    engine.releasePianoNote(immediate);
   }, [engine, isPlayingArp]);
 
   // Master Power Toggle (ON / OFF)
   const togglePower = async () => {
     const isNowRunning = await engine.toggleAudioState();
     setAudioRunning(isNowRunning);
-    if (!isNowRunning) {
-      stopNote();
-    } else {
-      // Direct audible confirmation
-      const f = computeFreq('A', currentOctave);
-      playNote(f, `LA${currentOctave}`);
+    // Guarantee clean silence when toggling sound power: never auto-trigger a note
+    stopNote(true);
+    if (onAudioStateChange) {
+      onAudioStateChange(isNowRunning);
     }
   };
 
@@ -243,10 +243,13 @@ export const HarmonicPianoPanel: React.FC<HarmonicPianoPanelProps> = ({
       // Always guarantee Audio Engine is active and running
       await engine.resumeContext();
       setAudioRunning(true);
+      if (onAudioStateChange) {
+        onAudioStateChange(true);
+      }
       engine.triggerPianoNote(freqX, freqY, waveform);
       onSelectPresetName(`Note ${noteLabel} (${freqX}Hz / ${freqY}Hz)`);
     },
-    [engine, selectedRatioIndex, waveform, onSelectPresetName]
+    [engine, selectedRatioIndex, waveform, onSelectPresetName, onAudioStateChange]
   );
 
   // Play Solfeggio direct preset
@@ -415,8 +418,15 @@ export const HarmonicPianoPanel: React.FC<HarmonicPianoPanelProps> = ({
 
           {/* Test Sound Button (La 432 Hz) */}
           <button
-            onClick={() => playNote(432, 'LA4 (432Hz Test)')}
-            title="Émettre un son de test immédiat à 432 Hz"
+            onClick={() => {
+              playNote(432, 'LA4 (432Hz Test)');
+              if (playMode === 'momentary') {
+                setTimeout(() => {
+                  stopNote(false);
+                }, 1000);
+              }
+            }}
+            title="Émettre un son de test immédiat à 432 Hz (1s en mode vrai piano)"
             className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl font-bold text-xs bg-[#10223e] hover:bg-[#18345e] text-cyan-300 border border-cyan-500/40 transition-all hover:scale-105"
           >
             <Radio className="w-4 h-4 text-cyan-400" />
